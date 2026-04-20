@@ -1,0 +1,12 @@
+# Environment
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Old SQLite databases (now using PostgreSQL)
+db/
+
+# Deploy temp files
+_*.*

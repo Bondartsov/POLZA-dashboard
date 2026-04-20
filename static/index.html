@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polza.AI — Дашборд</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+
+<!-- Sidebar backdrop -->
+<div class="sidebar-backdrop" id="sidebarBackdrop" onclick="toggleSidebar()"></div>
+
+<!-- Sidebar (fixed overlay) -->
+<div class="sidebar" id="sidebar">
+  <div class="sidebar-section">
+    <h3>🔑 API Ключи</h3>
+    <div id="keyList" class="key-list"></div>
+  </div>
+  <div class="sidebar-section">
+    <h3>📋 Вставить из Excel</h3>
+    <textarea id="keysPaste" rows="6" placeholder="Вставьте: Имя&#9;pza_ключ&#10;Имя&#9;pza_ключ"></textarea>
+    <div class="btn-row">
+      <button class="btn btn-primary" style="flex:1" onclick="loadPastedKeys()" id="btnLoadKeys">🔄 Загрузить по всем</button>
+    </div>
+    <div class="parsed-info" id="parsedInfo"></div>
+  </div>
+  <div class="sidebar-section">
+    <h3>⚙ Настройки</h3>
+    <div class="theme-toggle">
+      <input type="checkbox" id="themeSwitch" onchange="toggleTheme()">
+      <span>Светлая тема</span>
+    </div>
+    <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-bottom:6px">
+      <input type="checkbox" id="setAutoRefresh" onchange="toggleAutoRefresh()" checked>
+      Автообновление (60 сек)
+    </label>
+    <label style="font-size:12px">Записей на странице
+      <input type="number" id="setLimit" value="50" min="10" max="500" step="10" onchange="S.limit=+this.value;goPage(1)">
+    </label>
+  </div>
+  <div class="sidebar-section">
+    <h3>ℹ️ Подсказки</h3>
+    <div style="font-size:11px;color:var(--text2);line-height:1.6">
+      <p>Клик по строке → детали генерации</p>
+      <p><kbd style="background:var(--bg4);padding:1px 4px;border-radius:3px">ESC</kbd> закрыть модалку / sidebar</p>
+    </div>
+  </div>
+</div>
+
+<!-- Topbar -->
+<div class="topbar">
+  <button class="sidebar-toggle" onclick="toggleSidebar()" title="Настройки">⚙</button>
+  <h1>⚡ Polza.AI</h1>
+  <div class="balance-box" id="balanceBox" style="display:none">
+    <div class="balance-label">Баланс</div>
+    <div class="balance-value" id="balanceValue">—</div>
+  </div>
+  <div class="stats" id="topStats"></div>
+  <div class="update-info" id="updateInfo">—</div>
+</div>
+
+<!-- Global Progress Banner (sticky, always visible) -->
+<div class="progress-banner" id="progressBanner" style="display:none">
+  <div class="progress-banner-text" id="progressText">Загрузка...</div>
+  <div class="progress-bar"><div class="fill" id="progressFill" style="width:0%"></div></div>
+</div>
+
+<!-- Content -->
+<div class="content">
+  <!-- Filters -->
+  <div class="filters">
+    <div class="quick-dates">
+      <button class="btn" onclick="setQuickDate('today')">Сегодня</button>
+      <button class="btn" onclick="setQuickDate('week')">7 дней</button>
+      <button class="btn" onclick="setQuickDate('month')">Месяц</button>
+    </div>
+    <label>С <input type="date" id="dateFrom"></label>
+    <label>По <input type="date" id="dateTo"></label>
+    <label>Тип <select id="filterType"><option value="">Все</option><option value="chat">Chat</option><option value="responses">Responses</option><option value="image">Image</option><option value="video">Video</option><option value="audio">Audio</option></select></label>
+    <label>Статус <select id="filterStatus"><option value="">Все</option><option value="completed">✅ OK</option><option value="failed">❌ Failed</option><option value="pending">⏳ Pending</option></select></label>
+    <label>Ключ <select id="filterKey"><option value="">Все ключи</option></select></label>
+    <div class="search-box"><input type="text" id="searchInput" placeholder="Поиск..."></div>
+    <button class="btn" onclick="applyFilters()">Применить</button>
+    <button class="btn btn-danger" onclick="resetFilters()">✕ Сброс</button>
+  </div>
+
+  <!-- Group tabs -->
+  <div class="group-tabs">
+    <button class="group-tab active" data-group="flat" onclick="setGroup('flat',this)">📋 Плоский</button>
+    <button class="group-tab" data-group="day" onclick="setGroup('day',this)">📅 По дням</button>
+    <button class="group-tab" data-group="model" onclick="setGroup('model',this)">🤖 По моделям</button>
+    <button class="group-tab" data-group="key" onclick="setGroup('key',this)">🔑 По ключам</button>
+  </div>
+
+  <!-- Summary -->
+  <div class="summary-wrap">
+    <div class="summary-title" id="summaryTitle">Суммарно по всем загруженным данным</div>
+    <div class="summary-cards" id="summaryCards"></div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts-wrap" id="chartsWrap">
+    <div class="chart-box"><h4>💰 Стоимость по дням</h4><canvas id="chartCost"></canvas></div>
+    <div class="chart-box"><h4>🤖 Запросы по моделям</h4><canvas id="chartModels"></canvas></div>
+    <div class="chart-box"><h4>📦 Кэш: прочитано vs записано</h4><canvas id="chartCache"></canvas></div>
+    <div class="chart-box"><h4>🔑 Стоимость по ключам</h4><canvas id="chartKeys"></canvas></div>
+  </div>
+
+  <!-- Table -->
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th data-sort="createdAt" data-type="server" class="sorted">Дата</th>
+        <th data-sort="modelDisplayName" data-type="client">Модель</th>
+        <th data-sort="requestType" data-type="client">Тип</th>
+        <th data-sort="status" data-type="client">Статус</th>
+        <th data-sort="cost" data-type="server">Стоимость ₽</th>
+        <th data-sort="totalTokens" data-type="client">Вход (input)</th>
+        <th data-sort="cacheRead" data-type="client">Прочитано (кэш)</th>
+        <th data-sort="cacheWrite" data-type="client">Записано (кэш)</th>
+        <th data-sort="generationTimeMs" data-type="client">Время</th>
+        <th data-sort="apiKeyName" data-type="client">API Ключ</th>
+      </tr></thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+
+  <!-- Pagination -->
+  <div class="pagination" id="pagination"></div>
+</div>
+
+<!-- Detail Modal -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal">
+    <div class="modal-header"><h2 id="modalTitle">Детали</h2><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

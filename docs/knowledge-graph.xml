@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
+<!-- VERSION: 3.0.0 -->
+
+<KnowledgeGraph project="polza-dashboard" version="3.0.0">
+
+  <M-APP NAME="Flask App" TYPE="ENTRY_POINT">
+    <purpose>Flask web-server v3: DB-backed API + proxy for detail/log</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC</depends>
+    <annotations>
+      <fn-index PURPOSE="Serve index.html" />
+      <fn-config PURPOSE="Auth config + keys from DB + sync status" />
+      <fn-db_all PURPOSE="GET /api/db/all — all generations from PostgreSQL" />
+      <fn-db_gen PURPOSE="GET /api/db/generations — paginated from PostgreSQL" />
+      <fn-detail PURPOSE="Proxy to generation detail — resolves token from DB" />
+      <fn-log PURPOSE="Proxy to generation log — resolves token from DB" />
+      <fn-register PURPOSE="POST /api/keys — register keys in DB" />
+      <fn-sync_trigger PURPOSE="POST /api/sync — async trigger" />
+      <fn-sync_run PURPOSE="POST /api/sync/run — synchronous sync" />
+      <fn-balance PURPOSE="Account balance proxy" />
+      <fn-health PURPOSE="DB health check" />
+    </annotations>
+  </M-APP>
+
+  <M-DB NAME="Database Layer" TYPE="DATA_LAYER">
+    <purpose>SQLAlchemy ORM: api_keys + generations tables in PostgreSQL</purpose>
+    <path>db.py</path>
+    <depends>M-APP</depends>
+    <annotations>
+      <m-api_keys PURPOSE="Registered API keys with sync metadata (last_sync_at, total_synced)" />
+      <m-generations PURPOSE="Cached generation records from Polza.AI API" />
+      <fn-init_db PURPOSE="Create tables on startup" />
+      <fn-to_dict PURPOSE="Serialize Generation to API-compatible JSON" />
+    </annotations>
+  </M-DB>
+
+  <M-SYNC NAME="Sync Worker" TYPE="CORE_LOGIC">
+    <purpose>Background thread: incremental sync every 5 min from Polza.AI API to PostgreSQL</purpose>
+    <path>sync_worker.py</path>
+    <depends>M-DB</depends>
+    <annotations>
+      <fn-sync_key PURPOSE="Sync single key — fetches only new records since last_sync_at" />
+      <fn-sync_all PURPOSE="Sync all registered keys sequentially" />
+      <fn-upsert PURPOSE="INSERT ON CONFLICT UPDATE — dedup by generation id" />
+      <fn-trigger PURPOSE="Manual trigger for immediate sync" />
+      <constraint-buffer>SYNC_BUFFER=2min overlap to catch boundary records</constraint-buffer>
+    </annotations>
+  </M-SYNC>
+
+  <M-KEYS NAME="Key Parser" TYPE="UTILITY">
+    <purpose>Parse API keys from Excel (tab-separated), .env, free text</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-APP</depends>
+    <annotations>
+      <fn-parse_keys_text PURPOSE="Parse Name\tKey format from Excel paste" />
+    </annotations>
+  </M-KEYS>
+
+  <M-STATIC NAME="Frontend Assets" TYPE="UI_COMPONENT">
+    <purpose>SPA dashboard: table, charts, sidebar, detail modal — reads from DB</purpose>
+    <path>static/index.html, static/style.css, static/app.js</path>
+    <depends>M-APP</depends>
+    <annotations>
+      <fn-state PURPOSE="Global state management (S object)" />
+      <fn-render PURPOSE="Table, cards, pagination, charts rendering" />
+      <fn-charts PURPOSE="Chart.js analytics: timeline, models, cache, keys" />
+      <fn-sidebar PURPOSE="Overlay sidebar with key paste" />
+      <fn-detail PURPOSE="Modal with full log — backend resolves token" />
+      <fn-autorefresh PURPOSE="Auto-refresh every 60s — reads from DB (fast)" />
+      <fn-progress PURPOSE="Sticky progress banner for sync" />
+      <fn-key_filter PURPOSE="Dropdown filter by API key name" />
+    </annotations>
+  </M-STATIC>
+
+  <Constraints>
+    <constraint-sort>Polza.AI API supports only sortBy=createdAt|clientCost; DB supports all columns</constraint-sort>
+    <constraint-cache>cached_tokens in prompt_tokens_details = cache READ (hit); prompt_tokens - cached = cache WRITE (miss)</constraint-cache>
+    <constraint-sync>Sync every 5 min; incremental (only new records since last_sync_at - 2min buffer)</constraint-sync>
+    <constraint-token_resolv>Detail/log proxy resolves token from DB by source_key_name → api_keys.token</constraint-token_resolv>
+    <constraint-threaded>Flask threaded=True required for non-blocking operation</constraint-threaded>
+    <constraint-db>PostgreSQL 16, SQLAlchemy ORM, psycopg2-binary driver</constraint-db>
+  </Constraints>
+
+</KnowledgeGraph>
