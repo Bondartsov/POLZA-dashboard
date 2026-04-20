@@ -11,6 +11,7 @@ const S = {
   autoRefresh: true, refreshTimer: null, lastUpdate: null,
   keyNames: new Set(),
   balance: null,
+  sessions: [], sessionsLoading: false, expandedSession: null,
 };
 const KEY_COLORS = ['#6c7bf0','#4ade80','#f87171','#fbbf24','#60a5fa','#c084fc','#fb923c','#22d3ee','#f472b6','#a3e635','#f97316','#14b8a6'];
 const charts = {};
@@ -270,9 +271,20 @@ function filterItems() {
 
 function setGroup(mode, btn) {
   S.groupMode = mode;
+  S.expandedSession = null;
   document.querySelectorAll('.group-tab').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
-  renderTable();
+  if (mode === 'session') {
+    document.getElementById('tableWrap').style.display = 'none';
+    document.getElementById('pagination').style.display = 'none';
+    document.getElementById('sessionsWrap').style.display = 'block';
+    loadSessions();
+  } else {
+    document.getElementById('tableWrap').style.display = '';
+    document.getElementById('pagination').style.display = '';
+    document.getElementById('sessionsWrap').style.display = 'none';
+    renderTable();
+  }
 }
 
 // ─── Render: Summary ────────────────────────────────────────────────────────────
@@ -586,4 +598,139 @@ function rebuildKeyFilter() {
   [...names].sort().forEach(n => {
     sel.innerHTML += `<option value="${n}"${n===current?' selected':''}>${n}</option>`;
   });
+}
+
+// ─── Sessions ──────────────────────────────────────────────────────────────────
+async function loadSessions() {
+  S.sessionsLoading = true;
+  renderSessionsView();
+  try {
+    const params = getFilterParams();
+    const data = await apiGet('/api/db/sessions?' + params);
+    S.sessions = data.sessions || [];
+    S.sessionsLoading = false;
+    renderSessionsView();
+  } catch(e) {
+    S.sessionsLoading = false;
+    renderSessionsView();
+  }
+}
+
+function renderSessionsView() {
+  const el = document.getElementById('sessionsWrap');
+  if (S.sessionsLoading) {
+    el.innerHTML = '<div style="text-align:center;padding:32px"><div class="spinner"></div><br>Загрузка сессий...</div>';
+    return;
+  }
+  if (!S.sessions.length) {
+    el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text2)">Нет данных о сессиях.<br><small>Сессии доступны для ключей, использующих чат-клиенты (Cursor, Claude Code и т.д.)</small><br><button class="btn" style="margin-top:12px" onclick="runBackfill()">🔄 Заполнить metadata</button></div>';
+    return;
+  }
+
+  const totalCost = S.sessions.reduce((s,x) => s + x.totalCost, 0);
+  const totalReqs = S.sessions.reduce((s,x) => s + x.totalCount, 0);
+  const uniqueKeys = new Set(S.sessions.map(s => s.sourceKey)).size;
+
+  let html = `<div class="sessions-header">
+    <span>💬 <b>${fmtNum(S.sessions.length)}</b> сессий · <b>${fmtNum(totalReqs)}</b> запросов · <b>${fmtCost(totalCost)}</b> ₽ · <b>${uniqueKeys}</b> сотрудников</span>
+    <button class="btn" onclick="runBackfill()" style="font-size:11px">🔄 Заполнить metadata</button>
+  </div>`;
+
+  for (const s of S.sessions) {
+    const shortId = s.sessionId.slice(0, 8) + '…';
+    const first = new Date(s.firstAt), last = new Date(s.lastAt);
+    const durationMs = last - first;
+    const duration = durationMs > 3600000 ? (durationMs/3600000).toFixed(1) + ' ч' :
+                     durationMs > 60000 ? (durationMs/60000).toFixed(0) + ' мин' : '< 1 мин';
+    const cacheBar = s.cachePct > 0 ?
+      `<div class="cache-bar" style="height:6px;margin-top:4px"><div class="read" style="width:${s.cachePct}%"></div><div class="write" style="width:${100-s.cachePct}%"></div></div>` : '';
+
+    html += `<div class="session-card ${S.expandedSession===s.sessionId?'expanded':''}" onclick="toggleSession('${s.sessionId}')">
+      <div class="session-main">
+        <div class="session-id">💬 ${shortId}</div>
+        <div class="session-user">👤 ${esc(s.sourceKey||'?')}</div>
+        <div class="session-stats">
+          <span>${fmtNum(s.totalCount)} зап.</span>
+          <span class="cost">${fmtCost(s.totalCost)} ₽</span>
+          <span>${fmtNum(s.totalPrompt + s.totalCompletion)} токенов</span>
+        </div>
+        <div class="session-time">
+          <span>${fmtDate(s.firstAt)}</span>
+          <span style="color:var(--text2)">→ ${fmtDate(s.lastAt)}</span>
+          <span class="session-duration">${duration}</span>
+        </div>
+        <div class="session-models">${(s.models||[]).map(m=>'<span class="badge">'+esc(m)+'</span>').join(' ')}</div>
+        ${cacheBar ? '<div style="margin-top:2px;font-size:10px;color:var(--text2)">Кэш: '+s.cachePct+'% прочитано</div>'+cacheBar : ''}
+      </div>
+      <div class="session-detail" id="session-${s.sessionId.slice(0,8)}" style="display:${S.expandedSession===s.sessionId?'block':'none'}">
+        ${S.expandedSession===s.sessionId ? '<div class="loading"><div class="spinner"></div><br>Загрузка...</div>' : ''}
+      </div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+async function toggleSession(sessionId) {
+  if (S.expandedSession === sessionId) {
+    S.expandedSession = null;
+    renderSessionsView();
+    return;
+  }
+  S.expandedSession = sessionId;
+  renderSessionsView();
+
+  // Load generations for this session from client-side data
+  const items = S.items.filter(i => i._sessionId === sessionId);
+  const detailEl = document.getElementById('session-' + sessionId.slice(0, 8));
+  if (!detailEl) return;
+
+  if (!items.length) {
+    detailEl.innerHTML = '<div style="padding:12px;color:var(--text2);font-size:12px">Нет загруженных записей для этой сессии. Попробуйте обновить страницу.</div>';
+    return;
+  }
+
+  let html = '<table style="width:100%;font-size:12px"><thead><tr><th>Время</th><th>Модель</th><th>Тип</th><th>Стоимость</th><th>Вход</th><th>Кэш</th><th>Время</th></tr></thead><tbody>';
+  for (const it of items) {
+    const ci = getCacheInfo(it), cost = parseFloat(it.cost)||0;
+    html += `<tr onclick="openDetail('${it.id}')" style="cursor:pointer">
+      <td>${fmtDate(it.createdAt)}</td>
+      <td>${it.modelDisplayName||'—'}</td>
+      <td><span class="badge badge-${it.requestType}">${it.requestType||'?'}</span></td>
+      <td class="cost">${fmtCost(cost)}</td>
+      <td>${fmtNum(it.usage?.prompt_tokens||0)}</td>
+      <td><span style="color:var(--cache-read)">${ci.read>0?fmtNum(ci.read):'—'}</span></td>
+      <td>${fmtTime(it.generationTimeMs)}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  detailEl.innerHTML = html;
+}
+
+async function runBackfill() {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ Заполнение...';
+  showProgress('Заполнение metadata сессий...', 10);
+  try {
+    let totalEnriched = 0, iteration = 0;
+    while (iteration < 100) {
+      iteration++;
+      const r = await fetch('/api/sessions/backfill?limit=50', { method: 'POST' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      totalEnriched += data.enriched || 0;
+      const pct = data.done ? 100 : Math.min(90, 10 + iteration * 5);
+      showProgress(`Заполнение metadata: +${totalEnriched} enriched, осталось ~${data.remaining}`, pct);
+      if (data.done || data.remaining === 0) break;
+      await new Promise(r => setTimeout(r, 500));
+    }
+    showProgress(`✅ Metadata заполнено: ${totalEnriched} сессий enriched`, 100);
+    setTimeout(hideProgress, 3000);
+    await loadSessions();
+  } catch(e) {
+    showProgress('❌ ' + e.message, 0);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 Заполнить metadata';
+  }
 }

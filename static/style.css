@@ -204,3 +204,25 @@ tbody td{padding:6px 10px;vertical-align:middle;white-space:nowrap;max-width:260
 
 .parsed-info{font-size:11px;margin-top:6px;max-height:120px;overflow-y:auto}
 .parsed-info .ok{color:var(--green)}.parsed-info .err{color:var(--red)}
+
+/* ─── Sessions ─── */
+.sessions-wrap{padding:0 20px 20px}
+.sessions-header{display:flex;align-items:center;justify-content:space-between;padding:10px 0;font-size:12px;color:var(--text2);border-bottom:1px solid var(--border);margin-bottom:8px}
+.sessions-header b{color:var(--text)}
+.session-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;overflow:hidden;transition:border-color .15s;cursor:pointer}
+.session-card:hover{border-color:var(--accent)}
+.session-card.expanded{border-color:var(--accent)}
+.session-main{padding:12px 14px}
+.session-id{font-size:12px;font-weight:700;color:var(--accent2);font-family:monospace}
+.session-user{font-size:12px;color:var(--text);margin-top:3px}
+.session-stats{display:flex;gap:12px;font-size:11px;color:var(--text2);margin-top:4px;flex-wrap:wrap}
+.session-stats .cost{color:var(--orange);font-weight:600}
+.session-time{font-size:10px;color:var(--text2);margin-top:4px;display:flex;gap:8px;flex-wrap:wrap}
+.session-duration{background:var(--bg3);padding:1px 6px;border-radius:4px;font-weight:600;color:var(--accent2)}
+.session-models{margin-top:4px;display:flex;gap:4px;flex-wrap:wrap}
+.session-models .badge{font-size:9px;padding:1px 5px;background:var(--bg3);color:var(--text2);border:1px solid var(--border)}
+.session-detail{border-top:1px solid var(--border);background:var(--bg)}
+.session-detail table{font-size:11px}
+.session-detail th{font-size:9px;padding:6px 8px;background:var(--bg3)}
+.session-detail td{padding:4px 8px;font-size:11px}
+.session-detail tr:hover{background:var(--bg3)}

@@ -10,6 +10,7 @@ START_MODULE_CONTRACT
 END_MODULE_CONTRACT
 """
 import threading
+import json as _json
 import requests as http_requests
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -86,6 +87,40 @@ def _upsert_generation(session, item, source_key_name):
     session.execute(stmt)
 
 
+def _enrich_session_metadata(dbs, gen_id, token):
+    """Fetch generation detail and extract session_id/device_id from metadata.externalUserId."""
+    try:
+        r = http_requests.get(
+            f"{POLZA_API}/history/generations/{gen_id}",
+            headers=_headers(token), timeout=15
+        )
+        if r.status_code != 200:
+            return False
+        detail = r.json()
+        ext_user = detail.get("metadata", {}).get("externalUserId")
+        if not ext_user:
+            return False
+        try:
+            data = _json.loads(ext_user) if isinstance(ext_user, str) else ext_user
+        except (ValueError, TypeError):
+            return False
+        sid = data.get("session_id")
+        did = data.get("device_id")
+        if sid or did:
+            gen = dbs.query(Generation).get(gen_id)
+            if gen:
+                if sid:
+                    gen.session_id = sid
+                if did:
+                    gen.device_id = did
+                dbs.commit()
+            return True
+        return False
+    except Exception as e:
+        print(f"[Sync] Enrich {gen_id[:8]}: {e}")
+        return False
+
+
 def sync_key(session, api_key):
     """Sync a single API key — fetch new records since last_sync_at.
     Returns (new_count, error_string_or_None)."""
@@ -95,6 +130,7 @@ def sync_key(session, api_key):
 
     page = 1
     total_new = 0
+    all_ids = []
     while True:
         params = {"page": page, "limit": 100, "sortBy": "createdAt", "sortOrder": "desc"}
         if since:
@@ -118,6 +154,7 @@ def sync_key(session, api_key):
 
         for item in items:
             _upsert_generation(session, item, api_key.name)
+            all_ids.append(item["id"])
             total_new += 1
 
         session.commit()
@@ -125,6 +162,23 @@ def sync_key(session, api_key):
         if page >= tp:
             break
         page += 1
+
+    # Enrich session metadata for records without it
+    if all_ids:
+        gens_needing = session.query(Generation).filter(
+            Generation.id.in_(all_ids),
+            Generation.session_id.is_(None)
+        ).all()
+        enriched = 0
+        for gen in gens_needing:
+            if _enrich_session_metadata(session, gen.id, api_key.token):
+                enriched += 1
+            elif not gen.session_id:
+                # Mark as checked (no session data) to avoid re-checking
+                gen.session_id = ""
+                session.commit()
+        if enriched:
+            print(f"[Sync] {api_key.name}: enriched {enriched} session metadata")
 
     # Update key sync metadata
     api_key.last_sync_at = datetime.now(timezone.utc)

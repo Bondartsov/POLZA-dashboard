@@ -13,7 +13,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from flask import Flask, jsonify, request, send_from_directory
 import requests as http_requests
-from sqlalchemy import func, desc, asc
+from sqlalchemy import func, desc, asc, String as SaString
 
 if sys.platform == "win32":
     os.system("")
@@ -380,6 +380,130 @@ def api_balance():
         return jsonify({"error": f"HTTP {r.status_code}"}), r.status_code
     except Exception as e:
         return jsonify({"error": str(e)}), 502
+
+
+# ─── Routes: Sessions ────────────────────────────────────────────────────────────
+
+@app.route("/api/sessions/backfill", methods=["POST"])
+def api_sessions_backfill():
+    """Enrich session metadata for records where session_id IS NULL.
+    Processes up to `limit` records per call. Returns progress info."""
+    limit = int(request.args.get("limit", 50))
+    dbs = get_session()
+    try:
+        gens = dbs.query(Generation).filter(
+            Generation.session_id.is_(None)
+        ).order_by(desc(Generation.created_at_api)).limit(limit).all()
+
+        if not gens:
+            return jsonify({"enriched": 0, "remaining": 0, "done": True})
+
+        enriched = 0
+        no_data = 0
+        errors = 0
+        for gen in gens:
+            token = _resolve_token_for_gen(gen.id)
+            try:
+                r = http_requests.get(
+                    f"{POLZA_API}/history/generations/{gen.id}",
+                    headers=_headers(token), timeout=15
+                )
+                if r.status_code != 200:
+                    errors += 1
+                    continue
+                detail = r.json()
+                ext_user = detail.get("metadata", {}).get("externalUserId")
+                if ext_user:
+                    data = json.loads(ext_user) if isinstance(ext_user, str) else ext_user
+                    sid = data.get("session_id")
+                    did = data.get("device_id")
+                    if sid:
+                        gen.session_id = sid
+                    if did:
+                        gen.device_id = did
+                    dbs.commit()
+                    if sid or did:
+                        enriched += 1
+                    else:
+                        gen.session_id = ""
+                        dbs.commit()
+                        no_data += 1
+                else:
+                    gen.session_id = ""
+                    dbs.commit()
+                    no_data += 1
+            except Exception as e:
+                errors += 1
+                print(f"[Backfill] Error {gen.id[:8]}: {e}")
+
+        remaining = dbs.query(Generation).filter(
+            Generation.session_id.is_(None)
+        ).count()
+
+        return jsonify({
+            "enriched": enriched,
+            "noData": no_data,
+            "errors": errors,
+            "remaining": remaining,
+            "done": remaining == 0,
+        })
+    except Exception as e:
+        dbs.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        dbs.close()
+
+
+@app.route("/api/db/sessions")
+def api_db_sessions():
+    """Aggregated session data with date filters."""
+    dbs = get_session()
+    try:
+        q = dbs.query(
+            Generation.session_id,
+            Generation.source_key_name,
+            func.min(Generation.created_at_api).label("first_at"),
+            func.max(Generation.created_at_api).label("last_at"),
+            func.count(Generation.id).label("total_count"),
+            func.sum(Generation.cost).label("total_cost"),
+            func.sum(Generation.prompt_tokens).label("total_prompt"),
+            func.sum(Generation.cached_tokens).label("total_cached"),
+            func.sum(Generation.completion_tokens).label("total_completion"),
+            func.string_agg(func.distinct(Generation.model_display_name), ",").label("models_str"),
+        ).filter(
+            Generation.session_id.isnot(None),
+            Generation.session_id != "",
+        )
+
+        # Apply same date filters as generations
+        q = _apply_filters(q, request.args)
+
+        q = q.group_by(Generation.session_id, Generation.source_key_name)
+        q = q.order_by(desc("last_at"))
+
+        results = q.all()
+        sessions = []
+        for r in results:
+            cache_pct = round(r.total_cached / r.total_prompt * 100) if (r.total_prompt or 0) > 0 else 0
+            sessions.append({
+                "sessionId": r.session_id,
+                "sourceKey": r.source_key_name,
+                "firstAt": r.first_at.isoformat() if r.first_at else None,
+                "lastAt": r.last_at.isoformat() if r.last_at else None,
+                "totalCount": r.total_count,
+                "totalCost": float(r.total_cost or 0),
+                "totalPrompt": r.total_prompt or 0,
+                "totalCached": r.total_cached or 0,
+                "totalCompletion": r.total_completion or 0,
+                "cachePct": cache_pct,
+                "models": [m for m in (r.models_str or "").split(",") if m],
+            })
+
+        return jsonify({"sessions": sessions})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        dbs.close()
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────────

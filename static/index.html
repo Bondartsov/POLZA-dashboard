@@ -92,6 +92,7 @@
     <button class="group-tab" data-group="day" onclick="setGroup('day',this)">📅 По дням</button>
     <button class="group-tab" data-group="model" onclick="setGroup('model',this)">🤖 По моделям</button>
     <button class="group-tab" data-group="key" onclick="setGroup('key',this)">🔑 По ключам</button>
+    <button class="group-tab" data-group="session" onclick="setGroup('session',this)">💬 По сессиям</button>
   </div>
 
   <!-- Summary -->
@@ -109,7 +110,7 @@
   </div>
 
   <!-- Table -->
-  <div class="table-wrap">
+  <div class="table-wrap" id="tableWrap">
     <table>
       <thead><tr>
         <th data-sort="createdAt" data-type="server" class="sorted">Дата</th>
@@ -126,6 +127,9 @@
       <tbody id="tableBody"></tbody>
     </table>
   </div>
+
+  <!-- Sessions View -->
+  <div class="sessions-wrap" id="sessionsWrap" style="display:none"></div>
 
   <!-- Pagination -->
   <div class="pagination" id="pagination"></div>

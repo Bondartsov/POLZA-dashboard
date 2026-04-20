@@ -1,12 +1,23 @@
 # Environment
 .env
+*.env.local
 
-# Python cache
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
 
-# Old SQLite databases (now using PostgreSQL)
-db/
+# Temp files
+_tmp_*.b64
+_chunk_*.b64
+*.log
 
-# Deploy temp files
-_*.*
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

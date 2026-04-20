@@ -84,6 +84,8 @@ class Generation(Base):
     provider = Column(String(100))
     source_key_name = Column(String(255))
     usage_data = Column(JSON)
+    session_id = Column(String(100), nullable=True)
+    device_id = Column(String(128), nullable=True)
     synced_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
     __table_args__ = (
@@ -92,6 +94,7 @@ class Generation(Base):
         Index("idx_gen_model", "model_display_name"),
         Index("idx_gen_status", "status"),
         Index("idx_gen_request_type", "request_type"),
+        Index("idx_gen_session_id", "session_id"),
     )
 
     def to_dict(self):
@@ -119,6 +122,8 @@ class Generation(Base):
             "apiType": self.api_type,
             "provider": self.provider,
             "_sourceKey": self.source_key_name,
+            "_sessionId": self.session_id,
+            "_deviceId": self.device_id,
         }
 
 
