@@ -12,7 +12,15 @@ __pycache__/
 # Temp files
 _tmp_*.b64
 _chunk_*.b64
+_deploy_*.txt
+_part*.b64
+*.b64
 *.log
+
+# Database files
+db/*.db
+db/*.db-shm
+db/*.db-wal
 
 # IDE
 .vscode/
