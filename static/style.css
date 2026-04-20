@@ -34,6 +34,10 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .topbar .update-info .val{color:var(--text)}
 .topbar .stats{display:flex;gap:14px;font-size:12px;color:var(--text2)}
 .topbar .stats .val{color:var(--text);font-weight:600}
+.backfill-indicator{display:flex;align-items:center;gap:6px;font-size:11px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap;max-width:500px}
+.backfill-indicator:hover{border-color:var(--accent)}
+.backfill-indicator b{color:var(--text)}
+.backfill-indicator .btn{padding:1px 6px;font-size:10px}
 .sidebar-toggle{background:var(--bg3);border:1px solid var(--border);color:var(--text2);width:32px;height:32px;border-radius:6px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center}
 .sidebar-toggle:hover{background:var(--accent);color:#fff}
 

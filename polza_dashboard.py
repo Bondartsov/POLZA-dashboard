@@ -8,7 +8,7 @@ Architecture:
   PostgreSQL (api_keys, generations) <- sync_worker (every 5 min) <- Polza.AI API
   Frontend reads from DB (fast), detail/log proxied through API (needs correct token)
 """
-import argparse, json, os, sys
+import argparse, json, os, sys, threading, time
 from pathlib import Path
 from datetime import datetime, timezone
 from flask import Flask, jsonify, request, send_from_directory
@@ -382,76 +382,209 @@ def api_balance():
         return jsonify({"error": str(e)}), 502
 
 
-# ─── Routes: Sessions ────────────────────────────────────────────────────────────
+# ─── Routes: Sessions (Background Backfill) ──────────────────────────────────────
 
-@app.route("/api/sessions/backfill", methods=["POST"])
-def api_sessions_backfill():
-    """Enrich session metadata for records where session_id IS NULL.
-    Processes up to `limit` records per call. Returns progress info."""
-    limit = int(request.args.get("limit", 50))
-    dbs = get_session()
-    try:
-        gens = dbs.query(Generation).filter(
-            Generation.session_id.is_(None)
-        ).order_by(desc(Generation.created_at_api)).limit(limit).all()
+# Global backfill state
+_backfill = {
+    'running': False,
+    'enriched': 0,
+    'no_data': 0,
+    'errors': 0,
+    'remaining': 0,
+    'total': 0,
+    'error_msg': None,
+    'last_update': None,
+    'started_at': None,
+    'stop_requested': False,
+    'thread': None,
+    'lock': threading.Lock(),
+}
 
-        if not gens:
-            return jsonify({"enriched": 0, "remaining": 0, "done": True})
 
-        enriched = 0
-        no_data = 0
-        errors = 0
-        for gen in gens:
-            token = _resolve_token_for_gen(gen.id)
-            try:
-                r = http_requests.get(
-                    f"{POLZA_API}/history/generations/{gen.id}",
-                    headers=_headers(token), timeout=15
-                )
-                if r.status_code != 200:
-                    errors += 1
-                    continue
-                detail = r.json()
-                ext_user = detail.get("metadata", {}).get("externalUserId")
-                if ext_user:
-                    data = json.loads(ext_user) if isinstance(ext_user, str) else ext_user
-                    sid = data.get("session_id")
-                    did = data.get("device_id")
-                    if sid:
-                        gen.session_id = sid
-                    if did:
-                        gen.device_id = did
-                    dbs.commit()
-                    if sid or did:
-                        enriched += 1
+def _backfill_worker():
+    """Background thread: enrich session metadata for records where session_id IS NULL."""
+    print("[Backfill] Worker started")
+    while True:
+        with _backfill['lock']:
+            if _backfill['stop_requested']:
+                _backfill['running'] = False
+                print("[Backfill] Stopped by request")
+                return
+
+        dbs = get_session()
+        try:
+            batch = dbs.query(Generation).filter(
+                Generation.session_id.is_(None)
+            ).order_by(desc(Generation.created_at_api)).limit(50).all()
+
+            if not batch:
+                with _backfill['lock']:
+                    _backfill['remaining'] = 0
+                    _backfill['running'] = False
+                    _backfill['last_update'] = datetime.now(timezone.utc).isoformat()
+                print("[Backfill] Done — no more records")
+                return
+
+            batch_enriched = 0
+            batch_no_data = 0
+            batch_errors = 0
+            for gen in batch:
+                with _backfill['lock']:
+                    if _backfill['stop_requested']:
+                        _backfill['running'] = False
+                        print("[Backfill] Stopped mid-batch")
+                        return
+
+                token = _resolve_token_for_gen(gen.id)
+                try:
+                    r = http_requests.get(
+                        f"{POLZA_API}/history/generations/{gen.id}",
+                        headers=_headers(token), timeout=15
+                    )
+                    if r.status_code != 200:
+                        batch_errors += 1
+                        continue
+                    detail = r.json()
+                    ext_user = detail.get("metadata", {}).get("externalUserId")
+                    if ext_user:
+                        data = json.loads(ext_user) if isinstance(ext_user, str) else ext_user
+                        sid = data.get("session_id")
+                        did = data.get("device_id")
+                        if sid:
+                            gen.session_id = sid
+                        if did:
+                            gen.device_id = did
+                        dbs.commit()
+                        if sid or did:
+                            batch_enriched += 1
+                        else:
+                            gen.session_id = ""
+                            dbs.commit()
+                            batch_no_data += 1
                     else:
                         gen.session_id = ""
                         dbs.commit()
-                        no_data += 1
-                else:
-                    gen.session_id = ""
-                    dbs.commit()
-                    no_data += 1
-            except Exception as e:
-                errors += 1
-                print(f"[Backfill] Error {gen.id[:8]}: {e}")
+                        batch_no_data += 1
+                except Exception as e:
+                    batch_errors += 1
+                    print(f"[Backfill] Error {gen.id[:16]}: {e}")
 
-        remaining = dbs.query(Generation).filter(
-            Generation.session_id.is_(None)
-        ).count()
+            remaining = dbs.query(Generation).filter(
+                Generation.session_id.is_(None)
+            ).count()
 
+            with _backfill['lock']:
+                _backfill['enriched'] += batch_enriched
+                _backfill['no_data'] += batch_no_data
+                _backfill['errors'] += batch_errors
+                _backfill['remaining'] = remaining
+                _backfill['last_update'] = datetime.now(timezone.utc).isoformat()
+
+                if batch_errors >= 45:  # too many errors — pause with error
+                    _backfill['error_msg'] = f"Слишком много ошибок API ({batch_errors}/50 в последней партии)"
+                    _backfill['running'] = False
+                    print(f"[Backfill] Paused: {_backfill['error_msg']}")
+                    return
+
+            time.sleep(0.5)  # polite delay between batches
+
+        except Exception as e:
+            with _backfill['lock']:
+                _backfill['error_msg'] = str(e)
+                _backfill['running'] = False
+            print(f"[Backfill] Fatal error: {e}")
+            return
+        finally:
+            dbs.close()
+
+
+@app.route("/api/sessions/backfill/start", methods=["POST"])
+def api_backfill_start():
+    """Start background backfill thread."""
+    with _backfill['lock']:
+        if _backfill['running']:
+            return jsonify({"status": "already_running"})
+        # Reset counters on new start
+        _backfill['running'] = True
+        _backfill['enriched'] = 0
+        _backfill['no_data'] = 0
+        _backfill['errors'] = 0
+        _backfill['error_msg'] = None
+        _backfill['stop_requested'] = False
+        _backfill['started_at'] = datetime.now(timezone.utc).isoformat()
+        _backfill['last_update'] = _backfill['started_at']
+
+        # Count total remaining
+        dbs = get_session()
+        try:
+            _backfill['remaining'] = dbs.query(Generation).filter(
+                Generation.session_id.is_(None)
+            ).count()
+            _backfill['total'] = _backfill['remaining']
+        finally:
+            dbs.close()
+
+        t = threading.Thread(target=_backfill_worker, daemon=True)
+        _backfill['thread'] = t
+        t.start()
+
+    return jsonify({"status": "started", "remaining": _backfill['remaining']})
+
+
+@app.route("/api/sessions/backfill/stop", methods=["POST"])
+def api_backfill_stop():
+    """Request backfill to stop."""
+    with _backfill['lock']:
+        _backfill['stop_requested'] = True
+    return jsonify({"status": "stopping"})
+
+
+@app.route("/api/sessions/backfill/retry", methods=["POST"])
+def api_backfill_retry():
+    """Retry backfill after error (like start but keeps enriched count)."""
+    with _backfill['lock']:
+        if _backfill['running']:
+            return jsonify({"status": "already_running"})
+        saved_enriched = _backfill['enriched']
+        saved_no_data = _backfill['no_data']
+        _backfill['running'] = True
+        _backfill['errors'] = 0
+        _backfill['error_msg'] = None
+        _backfill['stop_requested'] = False
+        _backfill['started_at'] = datetime.now(timezone.utc).isoformat()
+        _backfill['last_update'] = _backfill['started_at']
+
+        dbs = get_session()
+        try:
+            _backfill['remaining'] = dbs.query(Generation).filter(
+                Generation.session_id.is_(None)
+            ).count()
+            _backfill['total'] = _backfill['remaining'] + saved_enriched + saved_no_data
+        finally:
+            dbs.close()
+
+        t = threading.Thread(target=_backfill_worker, daemon=True)
+        _backfill['thread'] = t
+        t.start()
+
+    return jsonify({"status": "restarted", "remaining": _backfill['remaining']})
+
+
+@app.route("/api/sessions/backfill/status")
+def api_backfill_status():
+    """Get current backfill status."""
+    with _backfill['lock']:
         return jsonify({
-            "enriched": enriched,
-            "noData": no_data,
-            "errors": errors,
-            "remaining": remaining,
-            "done": remaining == 0,
+            "running": _backfill['running'],
+            "enriched": _backfill['enriched'],
+            "noData": _backfill['no_data'],
+            "errors": _backfill['errors'],
+            "remaining": _backfill['remaining'],
+            "total": _backfill['total'],
+            "errorMsg": _backfill['error_msg'],
+            "lastUpdate": _backfill['last_update'],
+            "startedAt": _backfill['started_at'],
         })
-    except Exception as e:
-        dbs.rollback()
-        return jsonify({"error": str(e)}), 500
-    finally:
-        dbs.close()
 
 
 @app.route("/api/db/sessions")

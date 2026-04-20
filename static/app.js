@@ -116,6 +116,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   await loadPage();
   startAutoRefresh();
+  pollBackfillStatus(); // Check if backfill is running from previous session
 });
 
 // ─── Auto-refresh ───────────────────────────────────────────────────────────────
@@ -623,8 +624,7 @@ function renderSessionsView() {
     return;
   }
   if (!S.sessions.length) {
-    el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text2)">Нет данных о сессиях.<br><small>Сессии доступны для ключей, использующих чат-клиенты (Cursor, Claude Code и т.д.)</small><br><button class="btn" style="margin-top:12px" onclick="runBackfill()">🔄 Заполнить metadata</button></div>';
-    return;
+    el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text2)">Нет данных о сессиях.<br><small>Сессии доступны для ключей, использующих чат-клиенты (Cursor, Claude Code и т.д.)</small><br><button class="btn" style="margin-top:12px" onclick="runBackfill()">🔄 Заполнить metadata</button></div>';    return;
   }
 
   const totalCost = S.sessions.reduce((s,x) => s + x.totalCost, 0);
@@ -633,8 +633,7 @@ function renderSessionsView() {
 
   let html = `<div class="sessions-header">
     <span>💬 <b>${fmtNum(S.sessions.length)}</b> сессий · <b>${fmtNum(totalReqs)}</b> запросов · <b>${fmtCost(totalCost)}</b> ₽ · <b>${uniqueKeys}</b> сотрудников</span>
-    <button class="btn" onclick="runBackfill()" style="font-size:11px">🔄 Заполнить metadata</button>
-  </div>`;
+    <button class="btn" onclick="runBackfill()" style="font-size:11px">🔄 Заполнить metadata</button>  </div>`;
 
   for (const s of S.sessions) {
     const shortId = s.sessionId.slice(0, 8) + '…';
@@ -706,31 +705,83 @@ async function toggleSession(sessionId) {
   detailEl.innerHTML = html;
 }
 
-async function runBackfill() {
-  const btn = event.target;
-  btn.disabled = true;
-  btn.textContent = '⏳ Заполнение...';
-  showProgress('Заполнение metadata сессий...', 10);
+// ─── Backfill (server-side background) ────────────────────────────────────────
+
+let _backfillPollTimer = null;
+
+function startBackfillPoll() {
+  if (_backfillPollTimer) return;
+  _backfillPollTimer = setInterval(pollBackfillStatus, 2000);
+  pollBackfillStatus();
+}
+
+function stopBackfillPoll() {
+  if (_backfillPollTimer) { clearInterval(_backfillPollTimer); _backfillPollTimer = null; }
+}
+
+async function pollBackfillStatus() {
   try {
-    let totalEnriched = 0, iteration = 0;
-    while (iteration < 100) {
-      iteration++;
-      const r = await fetch('/api/sessions/backfill?limit=50', { method: 'POST' });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const data = await r.json();
-      totalEnriched += data.enriched || 0;
-      const pct = data.done ? 100 : Math.min(90, 10 + iteration * 5);
-      showProgress(`Заполнение metadata: +${totalEnriched} enriched, осталось ~${data.remaining}`, pct);
-      if (data.done || data.remaining === 0) break;
-      await new Promise(r => setTimeout(r, 500));
+    const data = await (await fetch('/api/sessions/backfill/status')).json();
+    renderBackfillIndicator(data);
+    // If running, keep polling. If stopped and we're on sessions tab, refresh sessions
+    if (!data.running) {
+      stopBackfillPoll();
+      if (S.groupMode === 'session' && data.enriched > 0) loadSessions();
     }
-    showProgress(`✅ Metadata заполнено: ${totalEnriched} сессий enriched`, 100);
-    setTimeout(hideProgress, 3000);
-    await loadSessions();
-  } catch(e) {
-    showProgress('❌ ' + e.message, 0);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '🔄 Заполнить metadata';
+  } catch(e) { /* ignore */ }
+}
+
+function renderBackfillIndicator(d) {
+  const el = document.getElementById('backfillIndicator');
+  const icon = document.getElementById('backfillIcon');
+  const text = document.getElementById('backfillText');
+  const time = document.getElementById('backfillTime');
+
+  if (!d.running && !d.errorMsg && d.remaining === 0 && d.enriched === 0) {
+    el.style.display = 'none';
+    return;
   }
+
+  el.style.display = 'flex';
+  const pct = d.total > 0 ? Math.round((d.enriched + d.noData) / d.total * 100) : 0;
+
+  if (d.running) {
+    icon.textContent = '⏳';
+    text.innerHTML = `<b>Backfill:</b> ${fmtNum(d.enriched)} enriched, осталось ${fmtNum(d.remaining)} <small>(${pct}%)</small>`;
+    time.textContent = d.lastUpdate ? fmtDate(d.lastUpdate) : '';
+  } else if (d.errorMsg) {
+    icon.textContent = '❌';
+    text.innerHTML = `<b>Backfill ошибка:</b> ${esc(d.errorMsg)} <button class="btn" style="font-size:10px;margin-left:6px" onclick="backfillRetry()">🔄 Повторить</button> <button class="btn" style="font-size:10px" onclick="backfillStop()">✕ Закрыть</button>`;
+    time.textContent = d.lastUpdate ? fmtDate(d.lastUpdate) : '';
+  } else if (d.remaining === 0 && d.enriched > 0) {
+    icon.textContent = '✅';
+    text.innerHTML = `<b>Backfill завершён:</b> ${fmtNum(d.enriched)} enriched, ${fmtNum(d.errors)} ошибок`;
+    time.textContent = d.lastUpdate ? fmtDate(d.lastUpdate) : '';
+    setTimeout(() => { el.style.display = 'none'; }, 8000);
+  } else if (d.enriched > 0) {
+    icon.textContent = '⏸';
+    text.innerHTML = `<b>Backfill приостановлен:</b> ${fmtNum(d.enriched)} enriched, ${fmtNum(d.remaining)} осталось`;
+    time.textContent = d.lastUpdate ? fmtDate(d.lastUpdate) : '';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+async function runBackfill() {
+  const r = await fetch('/api/sessions/backfill/start', { method: 'POST' });
+  if (!r.ok) { const e = await r.json(); alert('Ошибка: ' + (e.error||r.status)); return; }
+  startBackfillPoll();
+}
+
+async function backfillRetry() {
+  const r = await fetch('/api/sessions/backfill/retry', { method: 'POST' });
+  if (!r.ok) { const e = await r.json(); alert('Ошибка: ' + (e.error||r.status)); return; }
+  startBackfillPoll();
+}
+
+async function backfillStop() {
+  await fetch('/api/sessions/backfill/stop', { method: 'POST' });
+  stopBackfillPoll();
+  const data = await (await fetch('/api/sessions/backfill/status')).json();
+  renderBackfillIndicator(data);
 }
