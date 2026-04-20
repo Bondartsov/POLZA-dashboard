@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VerificationPlan VERSION="0.2.0">
+  <GlobalPolicy>
+    <log-format>[ModuleName][functionName][BLOCK_NAME] message</log-format>
+    <deterministic-first>true</deterministic-first>
+    <module-level-focus>Fast deterministic checks close to the module</module-level-focus>
+    <wave-level-focus>API smoke tests via curl against running server</wave-level-focus>
+    <phase-level-focus>Full browser testing + real data on VM</phase-level-focus>
+    <redaction>Never log API tokens, user prompt content, or raw LLM responses in full.</redaction>
+  </GlobalPolicy>
+
+  <CriticalFlows>
+
+    <VF-001 NAME="Employee Report Instant" USE_CASES="UC-001" DATA_FLOW="DF-001" PRIORITY="high">
+      <scenario>Admin opens employee report for Радько Кирилл, period 30d</scenario>
+      <expected-outcome>JSON with totals, session list, anomaly flags, hourly heatmap — response &lt; 500ms</expected-outcome>
+      <required-signals>
+        <log-marker>[EmployeeReport][report] returned JSON</log-marker>
+        <trace-sequence>QUERY_GENERATIONS -> DETECT_ANOMALIES -> RETURN_JSON</trace-sequence>
+      </required-signals>
+    </VF-001>
+
+    <VF-002 NAME="Session Summarize On-Demand" USE_CASES="UC-002" DATA_FLOW="DF-002" PRIORITY="high">
+      <scenario>Admin clicks Summarize on a session with 18 generations</scenario>
+      <expected-outcome>Summary text, topic, is_work classification — cached in DB — second click instant from cache</expected-outcome>
+      <required-signals>
+        <log-marker>[Summarizer][summarize_session][BLOCK_CALL_LLM] LLM response received</log-marker>
+        <log-marker>[Summarizer][summarize_session][BLOCK_PARSE_RESPONSE] parsed OK</log-marker>
+        <log-marker>[SummaryStore][upsert] cached session_id=...</log-marker>
+      </required-signals>
+    </VF-002>
+
+    <VF-003 NAME="Summarize All Background" USE_CASES="UC-004" DATA_FLOW="DF-003" PRIORITY="medium">
+      <scenario>Admin clicks Summarize All for employee with 5 sessions without summary</scenario>
+      <expected-outcome>Background thread processes all 5, topbar shows progress, survives page refresh</expected-outcome>
+      <required-signals>
+        <log-marker>[Summarizer][summarize_all_worker] started</log-marker>
+        <log-marker>[Summarizer][summarize_all_worker] session X done</log-marker>
+        <log-marker>[Summarizer][summarize_all_worker] completed</log-marker>
+      </required-signals>
+    </VF-003>
+
+    <VF-004 NAME="Anomaly Detection" USE_CASES="UC-005" DATA_FLOW="DF-004" PRIORITY="medium">
+      <scenario>Employee has generation at 23:15 on a Saturday with image-gen model</scenario>
+      <expected-outcome>Two anomalies flagged: OFF_HOURS + WEEKEND, one UNUSUAL_MODEL</expected-outcome>
+      <required-signals>
+        <log-marker>[Anomaly][detect] found N anomalies for employee X</log-marker>
+      </required-signals>
+    </VF-004>
+
+  </CriticalFlows>
+
+  <ModuleVerification>
+
+    <V-M-SUMMARY-STORE MODULE="M-SUMMARY-STORE" PRIORITY="high">
+      <test-files>
+        <file>tests/test_summary_store.py</file>
+      </test-files>
+      <module-checks>
+        <check-1>python -c "from db import SessionSummary; print('OK')"</check-1>
+        <check-2>curl -s http://localhost:5000/api/employee-report/list | python3 -m json.tool</check-2>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">CREATE TABLE session_summaries succeeds on startup</scenario-1>
+        <scenario-2 kind="success">Upsert creates new summary, second upsert updates it</scenario-2>
+        <scenario-3 kind="success">get_or_none returns None for unknown session, cached for known</scenario-3>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>[SummaryStore][upsert]</marker-1>
+      </required-log-markers>
+    </V-M-SUMMARY-STORE>
+
+    <V-M-EMPLOYEE-REPORT MODULE="M-EMPLOYEE-REPORT" PRIORITY="high">
+      <test-files>
+        <file>tests/test_employee_report.py</file>
+      </test-files>
+      <module-checks>
+        <check-1>curl -s "http://localhost:5000/api/employee-report?employee=Радько+Кирилл&amp;period=30d" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['totals']['cost']&gt;0"</check-1>
+        <check-2>curl -s http://localhost:5000/api/employee-report/list | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d['employees'])==12"</check-2>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Employee report returns correct cost sum for known employee</scenario-1>
+        <scenario-2 kind="success">Employee list returns all 12 keys with non-zero totals</scenario-2>
+        <scenario-3 kind="failure">Unknown employee returns empty sessions, zero totals</scenario-3>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>[EmployeeReport][report]</marker-1>
+        <marker-1>[EmployeeReport][report_list]</marker-1>
+      </required-log-markers>
+    </V-M-EMPLOYEE-REPORT>
+
+    <V-M-SESSION-SUMMARIZER MODULE="M-SESSION-SUMMARIZER" PRIORITY="high">
+      <test-files>
+        <file>tests/test_summarizer.py</file>
+      </test-files>
+      <module-checks>
+        <check-1>curl -s -X POST "http://localhost:5000/api/session/summarize?sessionId=168c4203-32ad-4a0d-97ed-ac7a7ac3a62b" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'summary' in d"</check-1>
+        <check-2>curl -s http://localhost:5000/api/session/summarize/status | python3 -m json.tool</check-2>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">First summarize calls LLM and caches result</scenario-1>
+        <scenario-2 kind="success">Second summarize returns from cache instantly</scenario-2>
+        <scenario-3 kind="failure">Invalid session_id returns error, not crash</scenario-3>
+        <scenario-4 kind="failure">LLM API error returns structured error with retry suggestion</scenario-4>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>[Summarizer][summarize_session][BLOCK_FETCH_LOGS]</marker-1>
+        <marker-2>[Summarizer][summarize_session][BLOCK_CALL_LLM]</marker-2>
+        <marker-3>[Summarizer][summarize_session][BLOCK_PARSE_RESPONSE]</marker-3>
+      </required-log-markers>
+    </V-M-SESSION-SUMMARIZER>
+
+    <V-M-ANOMALY MODULE="M-ANOMALY" PRIORITY="medium">
+      <module-checks>
+        <check-1>curl -s "http://localhost:5000/api/employee-report?employee=Радько+Кирилл&amp;period=30d" | python3 -c "import sys,json; d=json.load(sys.stdin); assert isinstance(d.get('anomalies'),list)"</check-1>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Generations at 23:00 trigger OFF_HOURS anomaly</scenario-1>
+        <scenario-2 kind="success">Weekend generations trigger WEEKEND anomaly</scenario-2>
+        <scenario-3 kind="success">100 generations in 1 hour trigger BURST anomaly</scenario-3>
+      </scenarios>
+    </V-M-ANOMALY>
+
+    <V-M-EMPLOYEE-UI MODULE="M-EMPLOYEE-UI" PRIORITY="medium">
+      <module-checks>
+        <check-1>Open http://10.61.11.54:5000 in browser, click "📊 По сотрудникам" tab — employee list appears</check-1>
+        <check-2>Click on employee name — report loads with sessions, anomalies, heatmap</check-2>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Employee list shows all 12 employees with costs</scenario-1>
+        <scenario-2 kind="success">Drill-down shows sessions with Summarize buttons</scenario-2>
+      </scenarios>
+    </V-M-EMPLOYEE-UI>
+
+  </ModuleVerification>
+
+  <PhaseGates>
+
+    <Gate-Phase-1 PHASE="Phase-1">
+      <goal>Employee Report works without AI — instant aggregation from DB for all 12 employees</goal>
+      <commands>
+        <command-1>curl -s http://localhost:5000/api/employee-report/list</command-1>
+        <command-2>curl -s "http://localhost:5000/api/employee-report?employee=Радько+Кирилл&amp;period=30d"</command-2>
+      </commands>
+      <required-evidence>
+        <evidence-1>All 12 employees returned with non-zero cost</evidence-1>
+        <evidence-2>Session list present for employees with session_id</evidence-2>
+        <evidence-3>Anomaly list present (possibly empty)</evidence-3>
+        <evidence-4>UI renders employee list and drill-down report</evidence-4>
+      </required-evidence>
+    </Gate-Phase-1>
+
+    <Gate-Phase-2 PHASE="Phase-2">
+      <goal>LLM summarization works — sessions get summaries cached in DB</goal>
+      <commands>
+        <command-1>curl -s -X POST "http://localhost:5000/api/session/summarize?sessionId=KNOWN_SESSION_ID"</command-1>
+        <command-2>curl -s http://localhost:5000/api/session/summarize/status</command-2>
+      </commands>
+      <required-evidence>
+        <evidence-1>Summary contains topic and is_work classification</evidence-1>
+        <evidence-2>Second call returns from cache (instant)</evidence-2>
+        <evidence-3>Summarize All processes multiple sessions in background</evidence-3>
+      </required-evidence>
+    </Gate-Phase-2>
+
+  </PhaseGates>
+
+  <FailurePackets>
+    <packet-template>
+      <expected-fields>scenario, expected-evidence, observed-evidence, first-divergent-block, next-action</expected-fields>
+    </packet-template>
+  </FailurePackets>
+
+</VerificationPlan>

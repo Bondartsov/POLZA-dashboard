@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RequirementsAnalysis VERSION="0.2.0">
+  <Project>
+    <name>polza-dashboard</name>
+    <annotation>Веб-дашборд мониторинга генераций AI-моделей Polza.AI. Отслеживание расходов 12 сотрудников, группировка по сессиям, LLM-суммаризация задач, выявление аномалий и нецелевого использования.</annotation>
+    <keywords>api-monitoring, cost-control, employee-tracking, session-summarization, anomaly-detection, flask, postgresql, spa</keywords>
+  </Project>
+
+  <Actors>
+    <actor-Admin>Администратор Polza.AI — видит отчёты по всем сотрудникам, контролирует расходы, выявляет нецелевое использование.</actor-Admin>
+    <actor-Employee>Сотрудник — генерирует запросы через API-ключ, не взаимодействует с дашбордом напрямую.</actor-Employee>
+    <actor-System>Фоновые процессы: sync-worker (каждые 5 мин), backfill-thread (on-demand), summarizer-thread (on-demand).</actor-System>
+  </Actors>
+
+  <UseCases>
+
+    <UC-001>
+      <Actor>Admin</Actor>
+      <Action>Просматривает агрегированный отчёт по сотруднику за период</Action>
+      <Goal>Понять сколько сотрудник потратил, какие задачи решал, за какой период</Goal>
+      <Preconditions>Данные синхронизированы из Polza.AI API в PostgreSQL</Preconditions>
+      <AcceptanceCriteria>
+        1. Отображается общая стоимость, токены, количество запросов за выбранный период
+        2. Список сессий с cost/tokens/duration/models
+        3. "Простые" генерации сгруппированы по дням для ключей без session_id
+        4. Heatmap активности по часам и дням недели
+        5. Аномалии: нерабочее время, выходные, burst-активность
+        6. Сравнение с предыдущим периодом (рост/снижение в %)
+      </AcceptanceCriteria>
+      <Priority>high</Priority>
+      <RelatedFlows>DF-001</RelatedFlows>
+    </UC-001>
+
+    <UC-002>
+      <Actor>Admin</Actor>
+      <Action>Нажимает "Summarize" на сессии сотрудника</Action>
+      <Goal>Узнать что именно делал сотрудник в рамках сессии — тему, задачу, проект</Goal>
+      <Preconditions>Сессия имеет session_id, генерации привязаны к этому session_id</Preconditions>
+      <AcceptanceCriteria>
+        1. Загружаются логи всех генераций сессии через detail API
+        2. Извлекаются user messages из логов
+        3. Отправляются в LLM (Haiku через Polza.AI API) для summarization
+        4. Результат кэшируется в session_summaries таблице
+        5. Отображается summary: тема, задача, is_work, project_guess
+        6. При повторном клике — результат из кэша (мгновенно)
+      </AcceptanceCriteria>
+      <Priority>high</Priority>
+      <RelatedFlows>DF-002</RelatedFlows>
+    </UC-002>
+
+    <UC-003>
+      <Actor>Admin</Actor>
+      <Action>Просматривает Employee Summary — сводку по всем задачам сотрудника</Action>
+      <Goal>Быстро понять чем занят сотрудник: рабочие задачи vs подозрения на личные проекты</Goal>
+      <Preconditions>Сессии сотрудника уже имеют summaries (UC-002)</Preconditions>
+      <AcceptanceCriteria>
+        1. Список задач с маркировкой: рабочая / подозрение / неясно
+        2. Общая статистика: X рабочих, Y подозрительных
+        3. Выделенные risk-flags: ночное время, необычные модели, burst-активность
+        4. Сравнение: "На этой неделе +340% vs предыдущая"
+      </AcceptanceCriteria>
+      <Priority>medium</Priority>
+      <RelatedFlows>DF-003</RelatedFlows>
+    </UC-004>
+
+    <UC-004>
+      <Actor>Admin</Actor>
+      <Action>Нажимает "Summarize All" — массовая суммаризация всех сессий сотрудника</Action>
+      <Goal>Получить полную картину по сотруднику без кликов по каждой сессии</Goal>
+      <Preconditions>Данные синхронизированы, session_id заполнены</Preconditions>
+      <AcceptanceCriteria>
+        1. Фоновый thread обрабатывает все сессии без summary
+        2. Прогресс виден в topbar-индикаторе (как backfill)
+        3. Каждая сессия получает summary, topic, is_work, project_guess
+        4. Переживает обновление страницы
+      </AcceptanceCriteria>
+      <Priority>medium</Priority>
+      <RelatedFlows>DF-004</RelatedFlows>
+    </UC-004>
+
+    <UC-005>
+      <Actor>System</Actor>
+      <Action>Выявляет аномалии в использовании API</Action>
+      <Goal>Автоматически подсветить подозрительное поведение</Goal>
+      <Preconditions>Данные синхронизированы</Preconditions>
+      <AcceptanceCriteria>
+        1. Нерабочее время: запросы с 22:00 до 08:00 по будням, любые запросы в выходные
+        2. Необычные модели: image-gen, video для ключей которые обычно делают chat
+        3. Burst: более 50 запросов за 1 час
+        4. Резкий рост стоимости: +200% vs предыдущая неделя
+        5. Аномалии подсвечиваются в отчёте сотрудника
+      </AcceptanceCriteria>
+      <Priority>medium</Priority>
+      <RelatedFlows>DF-005</RelatedFlows>
+    </UC-005>
+
+    <UC-006>
+      <Actor>Admin</Actor>
+      <Action>Просматривает дашборд — таблица генераций, графики, сессии</Action>
+      <Goal>Мониторинг в реальном времени: все генерации, cost, кэш, модели, баланс</Goal>
+      <Preconditions>Flask запущен, sync активен</Preconditions>
+      <AcceptanceCriteria>
+        1. Таблица генераций с сортировкой, фильтрами, пагинацией
+        2. Графики: стоимость по дням, модели, кэш, ключи
+        3. Группировка: плоский / по дням / по моделям / по ключам / по сессиям
+        4. Фоновый backfill session_id в topbar-индикаторе
+        5. Баланс в topbar
+        6. Тёмная/светлая тема
+      </AcceptanceCriteria>
+      <Priority>high</Priority>
+      <RelatedFlows>DF-006</RelatedFlows>
+    </UC-006>
+
+  </UseCases>
+
+  <NonGoals>
+    <item-1>Нет авторизации админа — дашборд доступен всем в локальной сети</item-1>
+    <item-2>Нет уведомлений/push — админ сам открывает дашборд</item-1>
+    <item-3>Нет интеграции с HR/биллингом — только мониторинг</item-3>
+    <item-4>Нет real-time streaming — данные обновляются раз в 60 сек или по sync</item-4>
+  </NonGoals>
+
+  <Constraints>
+    <constraint-1>Polza.AI API поддерживает только sortBy=createdAt|clientCost</constraint-1>
+    <constraint-2>session_id доступен только через detail API (/generations/{id}), НЕ через list API</constraint-2>
+    <constraint-3>12 API-ключей, ~8000 генераций, PostgreSQL на той же ВМ</constraint-3>
+    <constraint-4>LLM для summarization — Polza.AI API (Основной ключ), модель Haiku (дешёвая)</constraint-4>
+    <constraint-5>ВМ 10.61.11.54, Flask threaded=True, Python 3.10</constraint-5>
+    <constraint-6>Деплой через GitHub (git pull) — нет CI/CD pipeline</constraint-6>
+  </Constraints>
+
+  <Risks>
+    <risk-1>Rate limit Polza.AI API при массовой загрузке логов для summarization</risk-1>
+    <risk-2>LLM может некорректно классифицировать рабочее/личное — нужны аккуратные промпты</risk-2>
+    <risk-3>8 из 12 ключей не имеют session_id — для них только агрегация без AI-анализа</risk-3>
+    <risk-4>Логи генераций могут содержать чувствительные данные — нужна редукция перед LLM</risk-4>
+  </Risks>
+
+  <OpenQuestions>
+    <question-1>Нужна ли классификация по проектам? Если да — откуда взять список проектов?</question-1>
+    <question-2>Нужно ли хранить полные тексты промптов или достаточно summaries?</question-2>
+  </OpenQuestions>
+
+</RequirementsAnalysis>

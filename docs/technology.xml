@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TechnologyStack VERSION="0.2.0">
+  <Runtime>Python 3.10.12</Runtime>
+  <Language>Python 3.10 + JavaScript ES2022</Language>
+  <Framework>Flask 3.1.3 (threaded=True)</Framework>
+
+  <Dependencies>
+    <dep name="flask" version="3.1.3" purpose="Web server, routing, JSON API" />
+    <dep name="sqlalchemy" version="2.0.49" purpose="ORM for PostgreSQL models and queries" />
+    <dep name="psycopg2-binary" version="2.9.11" purpose="PostgreSQL driver" />
+    <dep name="requests" version="2.x" purpose="HTTP client for Polza.AI API proxy" />
+    <dep name="chart.js" version="4.x" purpose="Frontend charts (cost, models, cache, keys)" />
+  </Dependencies>
+
+  <VersionConstraints>
+    <constraint lib="sqlalchemy" min="2.0.0" max="2.x" reason="ORM uses 2.0-style queries" />
+    <constraint lib="flask" min="3.0.0" max="3.x" reason="App uses Flask 3 routing patterns" />
+  </VersionConstraints>
+
+  <Tooling>
+    <tool name="workspace" value="local project" />
+    <tool name="version-control" value="git" />
+    <tool name="deployment" value="GitHub → git pull on VM" />
+    <tool name="database" value="PostgreSQL 16" />
+    <tool name="vector-search" value="SocratiCode (Qdrant + Gemini embeddings)" />
+  </Tooling>
+
+  <Testing>
+    <module-level>
+      <command>python -m pytest tests/test_module.py</command>
+      <focus>Unit tests for individual functions and API endpoints</focus>
+    </module-level>
+    <wave-level>
+      <command>curl-based API smoke tests against running server</command>
+      <focus>Verify new endpoints return correct JSON shapes</focus>
+    </wave-level>
+    <phase-level>
+      <command>Manual browser testing + curl health check</command>
+      <focus>Full dashboard functionality, data integrity, performance</focus>
+    </phase-level>
+    <mocking-policy>Use real PostgreSQL on test DB. Mock only external API calls (Polza.AI).</mocking-policy>
+  </Testing>
+
+  <Observability>
+    <logger>print() to stdout (captured in dashboard.log via nohup)</logger>
+    <log-format>[ModuleName][functionName][BLOCK_NAME] message</log-format>
+    <required-fields>module, action, record-count, error-detail</required-fields>
+    <redaction>Never log API tokens, user prompts, or response content in full.</redaction>
+  </Observability>
+
+  <DeliveryShape>
+    <shape>Single Flask process (threaded=True) on Ubuntu VM. PostgreSQL 16 on same host. No containerization. Background threads for sync (5 min), backfill (on-demand), summarizer (on-demand).</shape>
+  </DeliveryShape>
+
+  <ExternalAPIs>
+    <api name="Polza.AI Generations List" endpoint="GET /v1/history/generations" auth="Bearer token" rate-limit="unknown" />
+    <api name="Polza.AI Generation Detail" endpoint="GET /v1/history/generations/{id}" auth="Bearer token" purpose="Full detail with metadata.externalUserId for session_id" />
+    <api name="Polza.AI Generation Log" endpoint="GET /v1/history/generations/{id}/log" auth="Bearer token" purpose="Full prompt+response log for summarization" />
+    <api name="Polza.AI Balance" endpoint="GET /v1/balance" auth="Bearer token" />
+    <api name="Polza.AI Chat Completions" endpoint="POST /v1/chat/completions" auth="Bearer token" purpose="LLM for summarization (Haiku model)" />
+  </ExternalAPIs>
+
+</TechnologyStack>

@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DevelopmentPlan VERSION="0.2.0">
+  <ArchitectureNotes>
+    <objective>Employee Monitor — система контроля расходов и суммаризации задач 12 сотрудников через LLM, поверх существующего Polza.AI Dashboard.</objective>
+    <non-goal>Не строить отдельное приложение — расширяем существующий Flask + SPA. Не заменять sync/backfill — дополняем.</non-goal>
+    <risk-1>Rate limit Polza.AI API при массовой загрузке логов для summarization — mitigated through batching and delay.</risk-1>
+    <risk-2>LLM может некорректно классифицировать рабочее/личное — нужен аккуратный промпт + human-in-the-loop через UI.</risk-2>
+    <risk-3>8 из 12 ключей не имеют session_id — для них только агрегация без AI-анализа.</risk-3>
+  </ArchitectureNotes>
+
+  <Modules>
+
+    <!-- ═══ EXISTING MODULES (done) ═══ -->
+
+    <M-APP NAME="Flask App" TYPE="ENTRY_POINT" LAYER="0" ORDER="1" STATUS="done">
+      <contract>
+        <purpose>Flask web-server v3: DB-backed API + proxy + background threads for sync/backfill</purpose>
+        <inputs>HTTP requests from browser</inputs>
+        <outputs>JSON API responses, static files</outputs>
+      </contract>
+      <interface>
+        <fn-index PURPOSE="Serve index.html" />
+        <fn-config PURPOSE="Auth config + keys + sync status" />
+        <fn-health PURPOSE="DB health check" />
+      </interface>
+      <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <verification-ref>V-M-APP</verification-ref>
+    </M-APP>
+
+    <M-DB NAME="Database Layer" TYPE="DATA_LAYER" LAYER="0" ORDER="1" STATUS="done">
+      <contract>
+        <purpose>SQLAlchemy ORM: api_keys + generations tables in PostgreSQL</purpose>
+      </contract>
+      <interface>
+        <fn-init_db PURPOSE="Create tables on startup" />
+        <fn-to_dict PURPOSE="Serialize Generation to JSON with _sessionId, _deviceId" />
+      </interface>
+      <target>
+        <source>db.py</source>
+      </target>
+      <verification-ref>V-M-DB</verification-ref>
+    </M-DB>
+
+    <M-SYNC NAME="Sync Worker" TYPE="CORE_LOGIC" LAYER="1" ORDER="1" STATUS="done">
+      <contract>
+        <purpose>Background thread: incremental sync every 5 min + session_id enrichment</purpose>
+      </contract>
+      <depends>M-DB</depends>
+      <target>
+        <source>sync_worker.py</source>
+      </target>
+      <verification-ref>V-M-SYNC</verification-ref>
+    </M-SYNC>
+
+    <M-BACKFILL NAME="Session Backfill" TYPE="CORE_LOGIC" LAYER="1" ORDER="2" STATUS="done">
+      <contract>
+        <purpose>Background thread: enrich session_id/device_id for historical records</purpose>
+      </contract>
+      <depends>M-DB</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <verification-ref>V-M-BACKFILL</verification-ref>
+    </M-BACKFILL>
+
+    <M-STATIC NAME="Frontend Assets" TYPE="UI_COMPONENT" LAYER="0" ORDER="1" STATUS="done">
+      <contract>
+        <purpose>SPA dashboard: table, charts, sidebar, sessions, backfill indicator</purpose>
+      </contract>
+      <target>
+        <source>static/index.html, static/style.css, static/app.js</source>
+      </target>
+      <verification-ref>V-M-STATIC</verification-ref>
+    </M-STATIC>
+
+    <M-KEYS NAME="Key Parser" TYPE="UTILITY" LAYER="0" ORDER="1" STATUS="done">
+      <contract>
+        <purpose>Parse API keys from Excel paste, .env, free text</purpose>
+      </contract>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+    </M-KEYS>
+
+    <!-- ═══ NEW MODULES (Employee Monitor) ═══ -->
+
+    <M-SUMMARY-STORE NAME="Session Summary Store" TYPE="DATA_LAYER" LAYER="0" ORDER="1" STATUS="planned">
+      <contract>
+        <purpose>SQLAlchemy model + CRUD for session_summaries table — caches LLM summaries per session</purpose>
+        <scope>CREATE TABLE, upsert, read by session_id, read by source_key, count without summary</scope>
+        <inputs>session_id, summary text, topic, is_work, risk_flags</inputs>
+        <outputs>SessionSummary ORM objects, JSON dicts</outputs>
+      </contract>
+      <interface>
+        <export-SessionSummary PURPOSE="ORM model: session_id, source_key, summary, topic, is_work, project_guess, risk_flags, llm_cost, created_at, updated_at" />
+        <fn-get_or_none PURPOSE="Get summary by session_id, return None if not cached" />
+        <fn-upsert PURPOSE="INSERT or UPDATE summary for a session_id" />
+        <fn-list_by_key PURPOSE="List summaries for an employee within date range" />
+        <fn-count_without_summary PURPOSE="Count sessions that don't have a summary yet" />
+      </interface>
+      <depends>M-DB</depends>
+      <target>
+        <source>db.py</source>
+      </target>
+      <observability>
+        <log-prefix>[SummaryStore]</log-prefix>
+      </observability>
+      <verification-ref>V-M-SUMMARY-STORE</verification-ref>
+      <notes>
+        <note-1>Added to db.py alongside existing ApiKey and Generation models. init_db() creates the table via create_all().</note-1>
+      </notes>
+    </M-SUMMARY-STORE>
+
+    <M-EMPLOYEE-REPORT NAME="Employee Report API" TYPE="ENTRY_POINT" LAYER="1" ORDER="1" STATUS="planned">
+      <contract>
+        <purpose>Fast aggregated report per employee for a time period — pure SQL, no AI, instant response</purpose>
+        <scope>Single endpoint returning cost/tokens/sessions/anomalies for one or all employees</scope>
+        <inputs>employee name (optional), period (today/7d/30d/all), dateFrom/dateTo</inputs>
+        <outputs>JSON: total cost, tokens, request count, session list, anomaly flags, hourly heatmap, comparison vs previous period</outputs>
+      </contract>
+      <interface>
+        <fn-report PURPOSE="GET /api/employee-report — aggregated data for one or all employees" />
+        <fn-report_list PURPOSE="GET /api/employee-report/list — summary table: each employee with cost/tokens/requests for period" />
+      </interface>
+      <depends>M-DB, M-SUMMARY-STORE</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <observability>
+        <log-prefix>[EmployeeReport]</log-prefix>
+      </observability>
+      <verification-ref>V-M-EMPLOYEE-REPORT</verification-ref>
+      <notes>
+        <note-1>All queries are pure SQLAlchemy aggregation — no external API calls, millisecond response.</note-1>
+      </notes>
+    </M-EMPLOYEE-REPORT>
+
+    <M-SESSION-SUMMARIZER NAME="Session Summarizer" TYPE="CORE_LOGIC" LAYER="2" ORDER="1" STATUS="planned">
+      <contract>
+        <purpose>LLM-powered summarization of a chat session — extracts task, topic, work/personal classification from user messages</purpose>
+        <scope>Load generation logs via detail API, extract user prompts, send to Polza.AI LLM (Haiku), parse structured response, cache in DB</scope>
+        <inputs>session_id (UUID)</inputs>
+        <outputs>summary text, topic, is_work boolean, project_guess, risk_flags, llm_cost</outputs>
+        <errors>
+          <error code="NO_GENERATIONS">Session has no generations in DB</error>
+          <error code="API_ERROR">Polza.AI detail or chat API returned error</error>
+          <error code="LLM_PARSE_ERROR">LLM response could not be parsed as structured data</error>
+        </errors>
+      </contract>
+      <interface>
+        <fn-summarize_session PURPOSE="Summarize single session — returns from cache or calls LLM</fn-summarize_session>
+        <fn-summarize_all PURPOSE="POST /api/session/summarize-all — background thread for all sessions of an employee</fn-summarize_all>
+        <fn-summarize_status PURPOSE="GET /api/session/summarize/status — polling endpoint for background progress</fn-summarize_status>
+      </interface>
+      <depends>M-DB, M-SUMMARY-STORE, M-APP</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <observability>
+        <log-prefix>[Summarizer]</log-prefix>
+        <critical-block>BLOCK_FETCH_LOGS</critical-block>
+        <critical-block>BLOCK_CALL_LLM</critical-block>
+        <critical-block>BLOCK_PARSE_RESPONSE</critical-block>
+      </observability>
+      <verification-ref>V-M-SESSION-SUMMARIZER</verification-ref>
+      <notes>
+        <note-1>Uses Polza.AI API (Основной ключ) with Haiku model for cheap summarization (~$0.005/session).</note-1>
+        <note-2>Background thread pattern same as M-BACKFILL — start/stop/status + topbar indicator.</note-1>
+      </notes>
+    </M-SESSION-SUMMARIZER>
+
+    <M-ANOMALY NAME="Anomaly Detector" TYPE="CORE_LOGIC" LAYER="1" ORDER="2" STATUS="planned">
+      <contract>
+        <purpose>Detect suspicious usage patterns: off-hours, weekends, unusual models, burst activity, cost spikes</purpose>
+        <scope>Called by M-EMPLOYEE-REPORT to annotate employee data with anomaly flags</scope>
+        <inputs>Employee generation records for a period</inputs>
+        <outputs>List of anomaly objects: type, severity, details</outputs>
+      </contract>
+      <interface>
+        <fn-detect PURPOSE="Analyze employee records, return anomaly list" />
+      </interface>
+      <depends>M-DB</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <observability>
+        <log-prefix>[Anomaly]</log-prefix>
+      </observability>
+      <verification-ref>V-M-ANOMALY</verification-ref>
+      <notes>
+        <note-1>Pure computation — no external API. Rules-based, not ML.</note-1>
+        <note-2>Anomaly types: OFF_HOURS (22:00-08:00), WEEKEND, UNUSUAL_MODEL, BURST_50_PLUS, COST_SPIKE_200_PCT.</note-2>
+      </notes>
+    </M-ANOMALY>
+
+    <M-EMPLOYEE-UI NAME="Employee Monitor UI" TYPE="UI_COMPONENT" LAYER="1" ORDER="1" STATUS="planned">
+      <contract>
+        <purpose>Frontend: employee list with costs, drill-down report with sessions, summaries, anomalies, heatmap</purpose>
+        <scope>New tab "📊 По сотрудникам", employee report modal/page, summarize buttons</scope>
+        <inputs>API responses from M-EMPLOYEE-REPORT and M-SESSION-SUMMARIZER</inputs>
+        <outputs>DOM rendering, user interactions</outputs>
+      </contract>
+      <interface>
+        <fn-load_employees PURPOSE="Load employee list with aggregated costs for period" />
+        <fn-render_employee_report PURPOSE="Render full report for selected employee" />
+        <fn-trigger_summarize PURPOSE="POST to start summarization, begin polling" />
+        <fn-render_heatmap PURPOSE="Render hourly activity heatmap SVG" />
+      </interface>
+      <depends>M-STATIC</depends>
+      <target>
+        <source>static/app.js, static/index.html, static/style.css</source>
+      </target>
+      <observability>
+        <log-prefix>[EmployeeUI]</log-prefix>
+      </observability>
+      <verification-ref>V-M-EMPLOYEE-UI</verification-ref>
+      <notes>
+        <note-1>Added as new group-tab "📊 По сотрудникам" in existing tab bar.</note-1>
+      </notes>
+    </M-EMPLOYEE-UI>
+
+  </Modules>
+
+  <DataFlow>
+
+    <DF-001 NAME="Employee Report (instant)" TRIGGER="Admin selects employee + period">
+      <step-1>Frontend calls GET /api/employee-report?employee=X&amp;period=30d</step-1>
+      <step-2>Backend queries PostgreSQL: SUM(cost), COUNT(*), GROUP BY session_id for employee</step-1>
+      <step-3>M-ANOMALY scans records for off-hours, weekends, burst, cost spike</step-3>
+      <step-4>Backend joins with session_summaries (if any) for enriched data</step-4>
+      <step-5>JSON response: {employee, period, totals, sessions[], anomalies[], heatmap[]}</step-5>
+      <evidence>[EmployeeReport][report] returns JSON with totals + sessions + anomalies</evidence>
+    </DF-001>
+
+    <DF-002 NAME="Session Summarize (on-demand)" TRIGGER="Admin clicks Summarize on a session card">
+      <step-1>Frontend calls POST /api/session/summarize?sessionId=UUID</step-1>
+      <step-2>M-SUMMARY-STORE checks cache — if hit, return immediately</step-2>
+      <step-3>Cache miss: load all generation IDs for this session from generations table</step-3>
+      <step-4>BLOCK_FETCH_LOGS: For each generation, call GET /v1/history/generations/{id}/log via Polza.AI API</step-4>
+      <step-5>Extract user messages from response logs, concatenate (first 500 chars each, max 20 messages)</step-5>
+      <step-6>BLOCK_CALL_LLM: POST /v1/chat/completions to Polza.AI with Haiku — structured prompt requesting summary/topic/is_work</step-6>
+      <step-7>BLOCK_PARSE_RESPONSE: Parse LLM JSON response into structured fields</step-7>
+      <step-8>M-SUMMARY-STORE.upsert(session_id, summary, topic, is_work, ...)</step-8>
+      <step-9>Return JSON: {sessionId, summary, topic, isWork, projectGuess, riskFlags, llmCost}</step-9>
+      <evidence>[Summarizer][summarize_session][BLOCK_CALL_LLM] LLM response received + [BLOCK_PARSE_RESPONSE] parsed OK</evidence>
+    </DF-002>
+
+    <DF-003 NAME="Summarize All (background)" TRIGGER="Admin clicks Summarize All for employee">
+      <step-1>Frontend calls POST /api/session/summarize-all?employee=X</step-1>
+      <step-2>Backend starts background thread (like M-BACKFILL pattern)</step-2>
+      <step-3>Thread iterates sessions without summary, calls DF-002 for each</step-3>
+      <step-4>Progress tracked in global _summarize dict: {running, done, total, errors}</step-4>
+      <step-5>Frontend polls GET /api/session/summarize/status every 2s — topbar indicator</step-5>
+      <step-6>When done, frontend refreshes employee report view</step-6>
+      <evidence>[Summarizer][summarize_all_worker] progress logged + topbar indicator visible</evidence>
+    </DF-003>
+
+    <DF-004 NAME="Anomaly Detection (computed)" TRIGGER="Part of DF-001 — no separate trigger">
+      <step-1>M-EMPLOYEE-REPORT passes employee generations to M-ANOMALY.detect()</step-1>
+      <step-2>Rule 1: OFF_HOURS — any generation with createdAt hour in 22:00-08:00 local time</step-2>
+      <step-3>Rule 2: WEEKEND — any generation on Saturday/Sunday</step-3>
+      <step-4>Rule 3: UNUSUAL_MODEL — model not in employee's top 3 models</step-4>
+      <step-5>Rule 4: BURST — more than 50 generations in any 1-hour window</step-5>
+      <step-6>Rule 5: COST_SPIKE — current period cost > 3x average of last 3 same-length periods</step-6>
+      <step-7>Returns list of {type, severity, details} objects</step-7>
+      <evidence>[Anomaly][detect] returns anomaly list with types and details</evidence>
+    </DF-004>
+
+  </DataFlow>
+
+  <ImplementationOrder>
+
+    <Phase-1 name="Employee Report (no AI)" status="pending">
+      <goal>Fast aggregated employee view — instant value, zero AI cost, pure SQL</goal>
+      <step-1 module="M-SUMMARY-STORE" status="pending" verification="V-M-SUMMARY-STORE">Add SessionSummary model to db.py + CREATE TABLE via migration script</step-1>
+      <step-2 module="M-ANOMALY" status="pending" verification="V-M-ANOMALY">Implement anomaly detection rules in polza_dashboard.py</step-2>
+      <step-3 module="M-EMPLOYEE-REPORT" status="pending" verification="V-M-EMPLOYEE-REPORT">Add /api/employee-report and /api/employee-report/list endpoints</step-3>
+      <step-4 module="M-EMPLOYEE-UI" status="pending" verification="V-M-EMPLOYEE-UI">Add "📊 По сотрудникам" tab, employee list, drill-down report, heatmap</step-4>
+      <step-5 module="M-STATIC" status="pending" verification="V-M-STATIC">CSS for employee cards, anomaly badges, heatmap</step-5>
+    </Phase-1>
+
+    <Phase-2 name="Session Summarizer (LLM)" status="pending">
+      <goal>AI-powered session analysis — task, topic, work/personal classification</goal>
+      <step-1 module="M-SESSION-SUMMARIZER" status="pending" verification="V-M-SESSION-SUMMARIZER">Implement single-session summarize with LLM call + caching</step-1>
+      <step-2 module="M-SESSION-SUMMARIZER" status="pending" verification="V-M-SESSION-SUMMARIZER">Add background summarize-all thread with status polling</step-2>
+      <step-3 module="M-EMPLOYEE-UI" status="pending" verification="V-M-EMPLOYEE-UI">Add Summarize/Summarize All buttons, topbar indicator, cached summary display</step-3>
+    </Phase-2>
+
+    <Phase-3 name="Polish & Deploy" status="pending">
+      <goal>Final integration, edge cases, full deploy</goal>
+      <step-1 module="M-EMPLOYEE-REPORT" status="pending">Add employee summary aggregation (all summaries into one report)</step-1>
+      <step-2 module="M-STATIC" status="pending">Final UI polish, mobile responsive, error states</step-2>
+      <step-3 module="M-APP" status="pending">Full deploy to VM, verify with real data</step-3>
+    </Phase-3>
+
+  </ImplementationOrder>
+
+  <ExecutionPolicy>
+    <default-profile>balanced</default-profile>
+    <controller-owns>docs/development-plan.xml, docs/knowledge-graph.xml, docs/verification-plan.xml</controller-owns>
+    <worker-owns>Only module source files and module-local tests inside the approved write scope.</worker-owns>
+  </ExecutionPolicy>
+
+</DevelopmentPlan>

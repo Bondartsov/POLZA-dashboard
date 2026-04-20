@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OperationalPackets VERSION="0.1.0">
+  <ExecutionPacketTemplate>
+    <ExecutionPacket>
+      <module-id>M-EXAMPLE</module-id>
+      <module-name>Example</module-name>
+      <purpose>Implement the approved module without architectural drift.</purpose>
+      <write-scope>
+        <file-1>polza_dashboard.py</file-1>
+        <file-2>db.py</file-2>
+        <file-3>static/app.js</file-3>
+        <file-4>static/index.html</file-5>
+        <file-5>static/style.css</file-6>
+      </write-scope>
+      <contract-excerpt><![CDATA[
+See development-plan.xml for full module contracts.
+      ]]></contract-excerpt>
+      <verification-excerpt><![CDATA[
+See verification-plan.xml for module checks and scenarios.
+      ]]></verification-excerpt>
+      <notes>
+        <note-1>Workers should only read more context when the packet is insufficient.</note-1>
+      </notes>
+    </ExecutionPacket>
+  </ExecutionPacketTemplate>
+
+  <GraphDeltaTemplate>
+    <GraphDelta module="M-EXAMPLE">
+      <imports-added />
+      <exports-added />
+      <annotations-added />
+      <cross-links-added />
+    </GraphDelta>
+  </GraphDeltaTemplate>
+
+  <VerificationDeltaTemplate>
+    <VerificationDelta module="M-EXAMPLE">
+      <test-files-added />
+      <module-checks />
+      <required-log-markers />
+    </VerificationDelta>
+  </VerificationDeltaTemplate>
+
+  <FailurePacketTemplate>
+    <FailurePacket>
+      <scenario>Description of failing scenario</scenario>
+      <contract-ref>M-XXX / V-M-XXX / scenario-N</contract-ref>
+      <expected-evidence />
+      <observed-evidence />
+      <first-divergent-block>BLOCK_NAME</first-divergent-block>
+      <suggested-next-action>Read the contract, inspect the divergent block, and apply the smallest safe fix.</suggested-next-action>
+    </FailurePacket>
+  </FailurePacketTemplate>
+</OperationalPackets>
