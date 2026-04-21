@@ -34,7 +34,7 @@ app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 sync_worker = None
 AUTH_TOKEN = ""
 LLM_API_URL = "https://api.anthropic.com/v1/messages"  # overridden from .env
-LLM_MODEL = "claude-haiku-4-5-20250414"  # overridden from .env
+LLM_MODEL = "claude-haiku-4-5-20251001"  # overridden from .env
 LLM_API_KEY = ""  # Anthropic API key; overridden from .env
 
 
