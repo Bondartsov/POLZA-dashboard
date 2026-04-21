@@ -11,8 +11,6 @@ const S = {
   autoRefresh: true, refreshTimer: null, lastUpdate: null,
   keyNames: new Set(),
   balance: null,
-  sessions: [], sessionsLoading: false, expandedSession: null,
-  employees: [], employeeReport: null, employeeLoading: false,
 };
 const KEY_COLORS = ['#6c7bf0','#4ade80','#f87171','#fbbf24','#60a5fa','#c084fc','#fb923c','#22d3ee','#f472b6','#a3e635','#f97316','#14b8a6'];
 const charts = {};
@@ -230,7 +228,7 @@ async function loadPage(silent = false) {
     updateTimestamp(); rebuildKeyFilter(); clientSideUpdate();
   } catch(e) {
     S.loading = false;
-    if (!silent) document.getElementById('tableBody').innerHTML = `<tr><td colspan="10" style="color:var(--red);padding:16px">❌ ${e.message}</td></tr>`;
+    if (!silent) document.getElementById('tableBody').innerHTML = `<tr><td colspan="11" style="color:var(--red);padding:16px">❌ ${e.message}</td></tr>`;
   }
 }
 
@@ -273,28 +271,9 @@ function filterItems() {
 
 function setGroup(mode, btn) {
   S.groupMode = mode;
-  S.expandedSession = null;
   document.querySelectorAll('.group-tab').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
-  if (mode === 'session') {
-    document.getElementById('tableWrap').style.display = 'none';
-    document.getElementById('pagination').style.display = 'none';
-    document.getElementById('sessionsWrap').style.display = 'block';
-    document.getElementById('employeeWrap').style.display = 'none';
-    loadSessions();
-  } else if (mode === 'employee') {
-    document.getElementById('tableWrap').style.display = 'none';
-    document.getElementById('pagination').style.display = 'none';
-    document.getElementById('sessionsWrap').style.display = 'none';
-    document.getElementById('employeeWrap').style.display = 'block';
-    loadEmployees();
-  } else {
-    document.getElementById('tableWrap').style.display = '';
-    document.getElementById('pagination').style.display = '';
-    document.getElementById('sessionsWrap').style.display = 'none';
-    document.getElementById('employeeWrap').style.display = 'none';
-    renderTable();
-  }
+  renderTable();
 }
 
 // ─── Render: Summary ────────────────────────────────────────────────────────────
@@ -399,15 +378,15 @@ function renderChart(id, type, data, opts = {}) {
 // ─── Render: Table ──────────────────────────────────────────────────────────────
 function renderTable() {
   const tbody = document.getElementById('tableBody');
-  if (S.loading) { tbody.innerHTML = '<tr><td colspan="10" class="loading"><div class="spinner"></div><br>Загрузка...</td></tr>'; return; }
+  if (S.loading) { tbody.innerHTML = '<tr><td colspan="11" class="loading"><div class="spinner"></div><br>Загрузка...</td></tr>'; return; }
   const items = S.filtered;
-  if (!items.length) { tbody.innerHTML = '<tr><td colspan="10" style="padding:16px;text-align:center;color:var(--text2)">Нет данных</td></tr>'; return; }
+  if (!items.length) { tbody.innerHTML = '<tr><td colspan="11" style="padding:16px;text-align:center;color:var(--text2)">Нет данных</td></tr>'; return; }
   let pageItems = S.allLoaded ? items.slice((S.page-1)*S.limit, S.page*S.limit) : items;
   let html = '';
   if (S.groupMode === 'flat') { html += renderRows(pageItems); }
   else {
     const groups = groupItems(pageItems);
-    for (const g of groups) { html += `<tr class="group-row"><td colspan="10">${groupLabel(g)}</td></tr>`; html += renderRows(g.items); }
+    for (const g of groups) { html += `<tr class="group-row"><td colspan="11">${groupLabel(g)}</td></tr>`; html += renderRows(g.items); }
   }
   tbody.innerHTML = html;
 }
@@ -416,6 +395,11 @@ function renderRows(items) {
   return items.map(it => {
     const ci = getCacheInfo(it), cost = parseFloat(it.cost)||0;
     const prompt = it.usage?.prompt_tokens || 0;
+    const summaryKey = `summary_${it.id}`;
+    const existingSummary = S[summaryKey];
+    const aiCell = existingSummary
+      ? `<div class="ai-summary-badge" title="${esc(existingSummary.topic || '')}\n\n${esc(existingSummary.summary || '')}"><div class="ai-topic">${esc(existingSummary.topic || 'OK')}</div><div class="ai-detail">${esc(existingSummary.summary || '').slice(0, 120)}</div></div>`
+      : `<button class="btn-ai-summarize" onclick="event.stopPropagation();summarizeGeneration('${it.id}',this)" title="AI суммаризация">🧠</button>`;
     return `<tr onclick="openDetail('${it.id}')">
       <td>${fmtDate(it.createdAt)}</td>
       <td title="${it.model||''}">${it.modelDisplayName||it.model||'—'}</td>
@@ -427,6 +411,7 @@ function renderRows(items) {
       <td><span class="cache-write ${ci.write===0?'zero':''}">${ci.write > 0 ? fmtNum(ci.write) : '—'}</span></td>
       <td>${fmtTime(it.generationTimeMs)}</td>
       <td>${it.apiKeyName||it.apiKeyShort||it._sourceKey||'—'}</td>
+      <td>${aiCell}</td>
     </tr>`;
   }).join('');
 }
@@ -610,110 +595,6 @@ function rebuildKeyFilter() {
   });
 }
 
-// ─── Sessions ──────────────────────────────────────────────────────────────────
-async function loadSessions() {
-  S.sessionsLoading = true;
-  renderSessionsView();
-  try {
-    const params = getFilterParams();
-    const data = await apiGet('/api/db/sessions?' + params);
-    S.sessions = data.sessions || [];
-    S.sessionsLoading = false;
-    renderSessionsView();
-  } catch(e) {
-    S.sessionsLoading = false;
-    renderSessionsView();
-  }
-}
-
-function renderSessionsView() {
-  const el = document.getElementById('sessionsWrap');
-  if (S.sessionsLoading) {
-    el.innerHTML = '<div style="text-align:center;padding:32px"><div class="spinner"></div><br>Загрузка сессий...</div>';
-    return;
-  }
-  if (!S.sessions.length) {
-    el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text2)">Нет данных о сессиях.<br><small>Сессии доступны для ключей, использующих чат-клиенты (Cursor, Claude Code и т.д.)</small><br><button class="btn" style="margin-top:12px" onclick="runBackfill()">🔄 Заполнить metadata</button></div>';    return;
-  }
-
-  const totalCost = S.sessions.reduce((s,x) => s + x.totalCost, 0);
-  const totalReqs = S.sessions.reduce((s,x) => s + x.totalCount, 0);
-  const uniqueKeys = new Set(S.sessions.map(s => s.sourceKey)).size;
-
-  let html = `<div class="sessions-header">
-    <span>💬 <b>${fmtNum(S.sessions.length)}</b> сессий · <b>${fmtNum(totalReqs)}</b> запросов · <b>${fmtCost(totalCost)}</b> ₽ · <b>${uniqueKeys}</b> сотрудников</span>
-    <button class="btn" onclick="runBackfill()" style="font-size:11px">🔄 Заполнить metadata</button>  </div>`;
-
-  for (const s of S.sessions) {
-    const shortId = s.sessionId.slice(0, 8) + '…';
-    const first = new Date(s.firstAt), last = new Date(s.lastAt);
-    const durationMs = last - first;
-    const duration = durationMs > 3600000 ? (durationMs/3600000).toFixed(1) + ' ч' :
-                     durationMs > 60000 ? (durationMs/60000).toFixed(0) + ' мин' : '< 1 мин';
-    const cacheBar = s.cachePct > 0 ?
-      `<div class="cache-bar" style="height:6px;margin-top:4px"><div class="read" style="width:${s.cachePct}%"></div><div class="write" style="width:${100-s.cachePct}%"></div></div>` : '';
-
-    html += `<div class="session-card ${S.expandedSession===s.sessionId?'expanded':''}" onclick="toggleSession('${s.sessionId}')">
-      <div class="session-main">
-        <div class="session-id">💬 ${shortId}</div>
-        <div class="session-user">👤 ${esc(s.sourceKey||'?')}</div>
-        <div class="session-stats">
-          <span>${fmtNum(s.totalCount)} зап.</span>
-          <span class="cost">${fmtCost(s.totalCost)} ₽</span>
-          <span>${fmtNum(s.totalPrompt + s.totalCompletion)} токенов</span>
-        </div>
-        <div class="session-time">
-          <span>${fmtDate(s.firstAt)}</span>
-          <span style="color:var(--text2)">→ ${fmtDate(s.lastAt)}</span>
-          <span class="session-duration">${duration}</span>
-        </div>
-        <div class="session-models">${(s.models||[]).map(m=>'<span class="badge">'+esc(m)+'</span>').join(' ')}</div>
-        ${cacheBar ? '<div style="margin-top:2px;font-size:10px;color:var(--text2)">Кэш: '+s.cachePct+'% прочитано</div>'+cacheBar : ''}
-      </div>
-      <div class="session-detail" id="session-${s.sessionId.slice(0,8)}" style="display:${S.expandedSession===s.sessionId?'block':'none'}">
-        ${S.expandedSession===s.sessionId ? '<div class="loading"><div class="spinner"></div><br>Загрузка...</div>' : ''}
-      </div>
-    </div>`;
-  }
-  el.innerHTML = html;
-}
-
-async function toggleSession(sessionId) {
-  if (S.expandedSession === sessionId) {
-    S.expandedSession = null;
-    renderSessionsView();
-    return;
-  }
-  S.expandedSession = sessionId;
-  renderSessionsView();
-
-  // Load generations for this session from client-side data
-  const items = S.items.filter(i => i._sessionId === sessionId);
-  const detailEl = document.getElementById('session-' + sessionId.slice(0, 8));
-  if (!detailEl) return;
-
-  if (!items.length) {
-    detailEl.innerHTML = '<div style="padding:12px;color:var(--text2);font-size:12px">Нет загруженных записей для этой сессии. Попробуйте обновить страницу.</div>';
-    return;
-  }
-
-  let html = '<table style="width:100%;font-size:12px"><thead><tr><th>Время</th><th>Модель</th><th>Тип</th><th>Стоимость</th><th>Вход</th><th>Кэш</th><th>Время</th></tr></thead><tbody>';
-  for (const it of items) {
-    const ci = getCacheInfo(it), cost = parseFloat(it.cost)||0;
-    html += `<tr onclick="openDetail('${it.id}')" style="cursor:pointer">
-      <td>${fmtDate(it.createdAt)}</td>
-      <td>${it.modelDisplayName||'—'}</td>
-      <td><span class="badge badge-${it.requestType}">${it.requestType||'?'}</span></td>
-      <td class="cost">${fmtCost(cost)}</td>
-      <td>${fmtNum(it.usage?.prompt_tokens||0)}</td>
-      <td><span style="color:var(--cache-read)">${ci.read>0?fmtNum(ci.read):'—'}</span></td>
-      <td>${fmtTime(it.generationTimeMs)}</td>
-    </tr>`;
-  }
-  html += '</tbody></table>';
-  detailEl.innerHTML = html;
-}
-
 // ─── Backfill (server-side background) ────────────────────────────────────────
 
 let _backfillPollTimer = null;
@@ -795,240 +676,37 @@ async function backfillStop() {
   renderBackfillIndicator(data);
 }
 
-// ─── START_BLOCK_EMPLOYEE_UI
-// M-EMPLOYEE-UI: Employee Monitor — list + drill-down report
+// ─── START_BLOCK_AI_SUMMARIZE
+// Per-generation AI summarization
 
-async function loadEmployees() {
-  S.employeeLoading = true;
-  S.employeeReport = null;
-  renderEmployeeView();
-  try {
-    const params = getFilterParams();
-    const data = await apiGet('/api/employee-report/list?' + params);
-    S.employees = data.employees || [];
-    S.employeeLoading = false;
-    renderEmployeeView();
-  } catch(e) {
-    S.employeeLoading = false;
-    renderEmployeeView();
-  }
-}
-
-function renderEmployeeView() {
-  const el = document.getElementById('employeeWrap');
-  if (S.employeeLoading && !S.employees.length) {
-    el.innerHTML = '<div style="text-align:center;padding:32px"><div class="spinner"></div><br>Загрузка сотрудников...</div>';
-    return;
-  }
-  if (S.employeeReport) {
-    renderEmployeeReport(el);
-    return;
-  }
-
-  const totalCost = S.employees.reduce((s, e) => s + e.totalCost, 0);
-  const totalReqs = S.employees.reduce((s, e) => s + e.totalRequests, 0);
-
-  let html = `<div class="employee-header">
-    <span>📊 <b>${S.employees.length}</b> сотрудников · <b>${fmtNum(totalReqs)}</b> запросов · <b>${fmtCost(totalCost)}</b> ₽</span>
-    <button class="btn" style="font-size:11px" onclick="loadEmployees()">🔄 Обновить</button>
-  </div>`;
-
-  html += '<div class="employee-grid">';
-
-  // Total card
-  html += `<div class="employee-card employee-total" onclick="openEmployeeReport('')">
-    <div class="emp-name">📊 Все сотрудники</div>
-    <div class="emp-stats">
-      <div class="emp-stat"><span class="emp-val">${fmtCost(totalCost)}</span><span class="emp-lbl">₽ стоимость</span></div>
-      <div class="emp-stat"><span class="emp-val">${fmtNum(totalReqs)}</span><span class="emp-lbl">запросов</span></div>
-    </div>
-  </div>`;
-
-  for (const e of S.employees) {
-    const costClass = e.totalCost > 100 ? 'cost-high' : e.totalCost > 50 ? 'cost-medium' : '';
-    html += `<div class="employee-card" onclick="openEmployeeReport('${esc(e.name)}')">
-      <div class="emp-name">👤 ${esc(e.name)}</div>
-      <div class="emp-stats">
-        <div class="emp-stat"><span class="emp-val ${costClass}">${fmtCost(e.totalCost)}</span><span class="emp-lbl">₽</span></div>
-        <div class="emp-stat"><span class="emp-val">${fmtNum(e.totalRequests)}</span><span class="emp-lbl">зап.</span></div>
-        <div class="emp-stat"><span class="emp-val">${fmtNum(e.totalTokens)}</span><span class="emp-lbl">токенов</span></div>
-        <div class="emp-stat"><span class="emp-val">${e.sessionCount || 0}</span><span class="emp-lbl">сессий</span></div>
-      </div>
-    </div>`;
-  }
-  html += '</div>';
-  el.innerHTML = html;
-}
-
-async function openEmployeeReport(name) {
-  S.employeeLoading = true;
-  S.employeeReport = null;
-  renderEmployeeView();
-
-  const el = document.getElementById('employeeWrap');
-  el.innerHTML = '<div style="text-align:center;padding:32px"><div class="spinner"></div><br>Загрузка отчёта...</div>';
-
-  try {
-    const params = getFilterParams();
-    if (name) params.set('employee', name);
-    else params.set('employee', '');
-    const data = await apiGet('/api/employee-report?' + params);
-    S.employeeReport = data;
-    S.employeeLoading = false;
-    renderEmployeeReport(el);
-  } catch(e) {
-    S.employeeLoading = false;
-    el.innerHTML = `<div style="padding:32px;color:var(--red)">❌ ${e.message}</div>`;
-  }
-}
-
-function renderEmployeeReport(el) {
-  const d = S.employeeReport;
-  if (!d) return;
-
-  const t = d.totals || {};
-  const anomalies = d.anomalies || [];
-  const sessions = d.sessions || [];
-  const heatmap = d.heatmap || [];
-  const models = d.models || [];
-
-  let html = `<div class="employee-header">
-    <button class="btn" onclick="S.employeeReport=null;renderEmployeeView()" style="font-size:11px">← Назад к списку</button>
-    <span>👤 <b>${esc(d.employee || 'Все сотрудники')}</b></span>
-    <button class="btn" style="font-size:11px" onclick="openEmployeeReport('${esc(d.employee)}')">🔄</button>
-  </div>`;
-
-  // Summary cards
-  html += '<div class="emp-report-summary">';
-  html += `<div class="summary-card"><div class="label">Стоимость</div><div class="value">${fmtCost(t.cost)} ₽</div></div>`;
-  html += `<div class="summary-card"><div class="label">Запросов</div><div class="value">${fmtNum(t.requests)}</div></div>`;
-  html += `<div class="summary-card"><div class="label">Сессий</div><div class="value">${fmtNum(t.sessions)}</div></div>`;
-  html += `<div class="summary-card"><div class="label">Токенов</div><div class="value">${fmtNum(t.tokens)}</div></div>`;
-  html += `<div class="summary-card"><div class="label">Кэш</div><div class="value">${t.tokens > 0 ? Math.round(t.cached / t.tokens * 100) : 0}%</div></div>`;
-  html += '</div>';
-
-  // Anomalies
-  if (anomalies.length) {
-    html += '<div class="emp-anomalies"><h4>⚠️ Аномалии</h4>';
-    for (const a of anomalies) {
-      const sevClass = 'anomaly-' + (a.severity || 'low');
-      html += `<div class="anomaly-badge ${sevClass}">
-        <span class="anomaly-type">${a.type}</span>
-        <span class="anomaly-details">${esc(a.details)}</span>
-      </div>`;
-    }
-    html += '</div>';
-  }
-
-  // Heatmap
-  html += '<div class="emp-heatmap-section"><h4>🕐 Активность по часам</h4>';
-  html += renderHeatmap(heatmap);
-  html += '</div>';
-
-  // Models
-  if (models.length) {
-    html += '<div class="emp-models"><h4>🤖 Модели</h4><div class="emp-model-list">';
-    for (const m of models) {
-      const pct = t.requests > 0 ? Math.round(m.count / t.requests * 100) : 0;
-      html += `<div class="emp-model-item">
-        <span class="emp-model-name">${esc(m.name)}</span>
-        <div class="emp-model-bar"><div style="width:${pct}%;background:var(--accent1)"></div></div>
-        <span class="emp-model-count">${fmtNum(m.count)} (${pct}%)</span>
-      </div>`;
-    }
-    html += '</div></div>';
-  }
-
-  // Sessions table
-  const uncachedSessions = sessions.filter(s => s.sessionId && !s._summary);
-  const hasSessions = sessions.some(s => s.sessionId);
-  html += '<div class="emp-sessions"><div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><h4 style="margin:0">💬 Сессии</h4>';
-  if (hasSessions && d.employee) {
-    html += `<button class="btn btn-summarize-all" id="btnSummarizeAll" onclick="summarizeAllForEmployee('${esc(d.employee)}')" style="font-size:11px">🧠 Суммаризировать все (${uncachedSessions.length})</button>`;
-    html += `<span class="summarize-progress" id="summarizeProgress" style="display:none;font-size:11px;color:var(--text2)"></span>`;
-  }
-  html += '</div>';
-  if (sessions.length) {
-    html += '<table class="emp-table"><thead><tr><th>ID</th><th>Период</th><th>Запросов</th><th>Стоимость</th><th>Модели</th><th>Summary</th></tr></thead><tbody>';
-    for (const s of sessions.slice(0, 50)) {
-      const sid = s.sessionId || '';
-      const shortId = sid.length > 8 ? sid.slice(0, 8) + '…' : sid;
-      const summaryHtml = sid ?
-        (s._summary ? `<div class="summary-badge ${s._summary.isWork ? 'work' : 'personal'}"><b>${esc(s._summary.topic || '?')}</b><br><span style="font-size:10px">${esc(s._summary.summary || '').slice(0, 80)}${(s._summary.summary||'').length > 80 ? '…' : ''}</span></div>` :
-        `<button class="btn btn-summarize" onclick="summarizeSession('${sid}',this)" style="font-size:10px;padding:2px 8px">🧠</button>`) :
-        '<span style="color:var(--text2)">—</span>';
-      html += `<tr>
-        <td title="${esc(sid)}">${sid ? '💬 ' + shortId : '📋 Без сессии'}</td>
-        <td>${fmtDate(s.firstAt)} → ${fmtDate(s.lastAt)}</td>
-        <td>${fmtNum(s.totalCount)}</td>
-        <td class="cost">${fmtCost(s.totalCost)} ₽</td>
-        <td>${(s.models || []).map(m => '<span class="badge">' + esc(m) + '</span>').join(' ')}</td>
-        <td>${summaryHtml}</td>
-      </tr>`;
-    }
-    if (sessions.length > 50) html += `<tr><td colspan="6" style="text-align:center;color:var(--text2)">…и ещё ${sessions.length - 50} сессий</td></tr>`;
-    html += '</tbody></table>';
-  } else {
-    html += '<div style="padding:16px;color:var(--text2);text-align:center">Нет данных о сессиях</div>';
-  }
-  html += '</div>';
-
-  el.innerHTML = html;
-}
-
-function renderHeatmap(data) {
-  if (!data || !data.length) return '<div style="color:var(--text2)">Нет данных</div>';
-  const days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-  const maxVal = Math.max(1, ...data.flat());
-
-  let html = '<div class="heatmap-grid">';
-  html += '<div class="heatmap-header"><div class="heatmap-corner"></div>';
-  for (let h = 0; h < 24; h++) html += `<div class="heatmap-hlabel">${h}</div>`;
-  html += '</div>';
-
-  for (let d = 0; d < 7; d++) {
-    html += `<div class="heatmap-row"><div class="heatmap-dlabel">${days[d]}</div>`;
-    for (let h = 0; h < 24; h++) {
-      const val = data[d][h] || 0;
-      const intensity = val / maxVal;
-      const bg = val === 0 ? 'var(--bg3)' : `rgba(108,123,240,${0.15 + intensity * 0.85})`;
-      html += `<div class="heatmap-cell" style="background:${bg}" title="${days[d]} ${h}:00 — ${val} запросов">${val || ''}</div>`;
-    }
-    html += '</div>';
-  }
-  html += '</div>';
-  return html;
-}
-
-// ─── END_BLOCK_EMPLOYEE_UI
-
-// ─── START_BLOCK_SUMMARIZE_UI
-// M-SESSION-SUMMARIZER: Frontend — Summarize buttons + background polling
-
-async function summarizeSession(sessionId, btnEl) {
+async function summarizeGeneration(genId, btnEl) {
   if (!btnEl) return;
   btnEl.disabled = true;
-  btnEl.textContent = '⏳...';
+  btnEl.textContent = '⏳';
   try {
-    const r = await fetch('/api/session/summarize', {
+    const r = await fetch('/api/generation/summarize', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({sessionId}),
+      body: JSON.stringify({generationId: genId}),
     });
     const data = await r.json();
     if (!r.ok) {
       btnEl.textContent = '❌';
-      btnEl.title = data.error || 'Error';
+      btnEl.title = data.error || 'Ошибка';
       btnEl.disabled = false;
       return;
     }
+    // Cache summary in state
+    S[`summary_${genId}`] = data;
     // Replace button with summary badge
     const td = btnEl.closest('td');
-    if (td && data.topic) {
-      const isWork = data.isWork !== false;
-      td.innerHTML = `<div class="summary-badge ${isWork ? 'work' : 'personal'}"><b>${esc(data.topic)}</b><br><span style="font-size:10px">${esc(data.summary || '').slice(0, 80)}${(data.summary||'').length > 80 ? '…' : ''}</span></div>`;
-    } else if (td) {
-      td.innerHTML = `<span style="color:var(--text2);font-size:10px">✅ OK</span>`;
+    if (td) {
+      const badge = document.createElement('div');
+      badge.className = 'ai-summary-badge';
+      badge.title = `${data.topic || ''}\n\n${data.summary || ''}${data.isWork === false ? '\n\n⚠️ Подозрение на личное использование' : ''}`;
+      badge.innerHTML = `<div class="ai-topic">${esc(data.topic || 'OK')}</div><div class="ai-detail">${esc(data.summary || '').slice(0, 120)}${(data.summary||'').length > 120 ? '…' : ''}</div>`;
+      td.innerHTML = '';
+      td.appendChild(badge);
     }
   } catch(e) {
     btnEl.textContent = '❌';
@@ -1037,83 +715,4 @@ async function summarizeSession(sessionId, btnEl) {
   }
 }
 
-let _summarizePollTimer = null;
-
-async function summarizeAllForEmployee(employee) {
-  const btn = document.getElementById('btnSummarizeAll');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Запуск...'; }
-  try {
-    const r = await fetch('/api/session/summarize-all?employee=' + encodeURIComponent(employee), {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-    });
-    const data = await r.json();
-    if (data.status === 'already_running') {
-      if (btn) { btn.textContent = '⏳ Уже запущен'; btn.disabled = true; }
-    } else {
-      if (btn) btn.textContent = '⏳ Обработка...';
-    }
-    startSummarizePoll(employee);
-  } catch(e) {
-    if (btn) { btn.textContent = '❌ Ошибка'; btn.disabled = false; }
-  }
-}
-
-function startSummarizePoll(employee) {
-  if (_summarizePollTimer) return;
-  _summarizePollTimer = setInterval(() => pollSummarizeStatus(employee), 2000);
-  pollSummarizeStatus(employee);
-}
-
-function stopSummarizePoll() {
-  if (_summarizePollTimer) { clearInterval(_summarizePollTimer); _summarizePollTimer = null; }
-}
-
-async function pollSummarizeStatus(employee) {
-  const prog = document.getElementById('summarizeProgress');
-  const btn = document.getElementById('btnSummarizeAll');
-  try {
-    const data = await (await fetch('/api/session/summarize/status')).json();
-    if (!data.running) {
-      stopSummarizePoll();
-      if (prog) { prog.style.display = 'none'; }
-      if (btn) { btn.disabled = false; btn.textContent = `🧠 Суммаризировать`; }
-      // Refresh report
-      if (data.done > 0 && employee) openEmployeeReport(employee);
-      return;
-    }
-    const pct = data.total > 0 ? Math.round(data.done / data.total * 100) : 0;
-    if (prog) {
-      prog.style.display = 'inline';
-      prog.innerHTML = `⏳ ${data.done}/${data.total} сессий (${pct}%) · ошибок: ${data.errors}`;
-    }
-    if (btn) btn.textContent = `⏳ ${data.done}/${data.total}...`;
-    // Update topbar indicator
-    renderSummarizeIndicator(data);
-  } catch(e) { /* ignore */ }
-}
-
-function renderSummarizeIndicator(d) {
-  let el = document.getElementById('summarizeIndicator');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'summarizeIndicator';
-    el.className = 'backfill-indicator';
-    el.onclick = () => {}; // click to see details
-    document.querySelector('.topbar').appendChild(el);
-  }
-  if (!d.running && d.done === 0) {
-    el.style.display = 'none';
-    return;
-  }
-  el.style.display = 'flex';
-  const pct = d.total > 0 ? Math.round(d.done / d.total * 100) : 0;
-  if (d.running) {
-    el.innerHTML = `<span>🧠</span><span><b>Summarize:</b> ${d.done}/${d.total} (${pct}%) — ${esc(d.employee || '')}</span>`;
-  } else {
-    el.innerHTML = `<span>✅</span><span><b>Summarize завершён:</b> ${d.done} сессий, ${d.errors} ошибок</span>`;
-    setTimeout(() => { el.style.display = 'none'; }, 8000);
-  }
-}
-
-// ─── END_BLOCK_SUMMARIZE_UI
+// ─── END_BLOCK_AI_SUMMARIZE

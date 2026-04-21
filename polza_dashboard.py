@@ -1095,6 +1095,122 @@ def api_session_summarize():
         return jsonify({"error": "Internal server error during summarization", "details": str(e), "sessionId": session_id}), 500
 
 
+# ─── Generation-level summarize (per single log) ──────────────────────────────────
+
+GEN_SUMMARIZE_PROMPT = """Ты — аналитик AI-мониторинга. Проанализируй запрос пользователя к AI-модели и верни СТРОГО JSON:
+
+{
+  "summary": "Краткое описание что делает пользователь (1-2 предложения, русский)",
+  "topic": "Основная тема (2-4 слова, русский)",
+  "is_work": true,
+  "project_guess": "Предположение о проекте (если понятно)",
+  "risk_flags": []
+}
+
+Правила:
+- is_work = true если задачи выглядят рабочими (код, аналитика, документация, тестирование)
+- is_work = false если похоже на личное использование (игры, рецепты, личные письма)
+- risk_flags: массив строк — "off_hours", "personal", "unusual_model", "high_cost"
+- Отвечай ТОЛЬКО JSON, без markdown, без пояснений"""
+
+
+@app.route("/api/generation/summarize", methods=["POST"])
+def api_generation_summarize():
+    """Summarize a single generation by ID — fetches log, extracts prompt, calls LLM."""
+    data = request.get_json(silent=True) or {}
+    gen_id = data.get("generationId", "")
+    if not gen_id:
+        return jsonify({"error": "generationId required"}), 400
+
+    try:
+        token = _resolve_token_for_gen(gen_id)
+
+        # Fetch generation log
+        r = http_requests.get(
+            f"{POLZA_API}/history/generations/{gen_id}/log",
+            headers=_headers(token), timeout=30,
+        )
+        if r.status_code != 200:
+            return jsonify({"topic": "Лог недоступен", "summary": f"HTTP {r.status_code}", "isWork": True, "generationId": gen_id}), 200
+
+        log_data = r.json()
+        msgs = log_data.get("request", {}).get("messages", [])
+
+        # Extract user messages
+        user_parts = []
+        for m in msgs:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if role == "user" and content:
+                user_parts.append(str(content)[:500])
+
+        total_text = "\n---\n".join(user_parts)[:2000]
+
+        if not total_text.strip():
+            for m in msgs:
+                content = m.get("content", "")
+                if content:
+                    user_parts.append(str(content)[:500])
+            total_text = "\n---\n".join(user_parts)[:2000]
+
+        if not total_text.strip():
+            return jsonify({"topic": "Пустой запрос", "summary": "Нет текста для анализа", "isWork": True, "generationId": gen_id}), 200
+
+        # Call LLM
+        llm_payload = {
+            "model": "anthropic/claude-3-5-haiku-20241022",
+            "messages": [
+                {"role": "system", "content": GEN_SUMMARIZE_PROMPT},
+                {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{total_text}"},
+            ],
+            "max_tokens": 400,
+            "temperature": 0.3,
+        }
+
+        llm_r = http_requests.post(
+            f"{POLZA_API}/chat/completions",
+            headers={**_headers(AUTH_TOKEN), "Content-Type": "application/json"},
+            json=llm_payload,
+            timeout=30,
+        )
+
+        if llm_r.status_code != 200:
+            print(f"[GenSummarize][LLM] HTTP {llm_r.status_code}: {llm_r.text[:200]}")
+            return jsonify({"topic": "Ошибка LLM", "summary": f"HTTP {llm_r.status_code}", "generationId": gen_id}), 200
+
+        llm_response = llm_r.json()
+        llm_content = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        if not llm_content:
+            return jsonify({"topic": "Пустой ответ LLM", "summary": "", "isWork": True, "generationId": gen_id}), 200
+
+        # Parse JSON from response
+        json_str = llm_content.strip()
+        if json_str.startswith("```"):
+            lines = json_str.split("\n")
+            json_str = "\n".join(lines[1:-1])
+        if json_str.startswith("json"):
+            json_str = json_str[4:].strip()
+
+        parsed = json.loads(json_str)
+
+        return jsonify({
+            "generationId": gen_id,
+            "summary": parsed.get("summary", ""),
+            "topic": parsed.get("topic", ""),
+            "isWork": parsed.get("is_work", True),
+            "projectGuess": parsed.get("project_guess"),
+            "riskFlags": parsed.get("risk_flags", []),
+        })
+
+    except json.JSONDecodeError:
+        raw = llm_content if 'llm_content' in dir() else ''
+        return jsonify({"topic": "Анализ завершён", "summary": (raw or "Не удалось распарсить")[:200], "isWork": True, "generationId": gen_id}), 200
+    except Exception as e:
+        print(f"[GenSummarize] ERROR: {e}")
+        return jsonify({"error": str(e), "topic": "Ошибка", "summary": "", "generationId": gen_id}), 500
+
+
 def _summarize_all_worker(employee: str):
     """Background thread: summarize all sessions without summary for an employee."""
     print(f"[Summarizer][summarize_all_worker] started for {employee}")

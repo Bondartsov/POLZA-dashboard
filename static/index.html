@@ -97,8 +97,6 @@
     <button class="group-tab" data-group="day" onclick="setGroup('day',this)">📅 По дням</button>
     <button class="group-tab" data-group="model" onclick="setGroup('model',this)">🤖 По моделям</button>
     <button class="group-tab" data-group="key" onclick="setGroup('key',this)">🔑 По ключам</button>
-    <button class="group-tab" data-group="session" onclick="setGroup('session',this)">💬 По сессиям</button>
-    <button class="group-tab" data-group="employee" onclick="setGroup('employee',this)">📊 По сотрудникам</button>
   </div>
 
   <!-- Summary -->
@@ -129,16 +127,11 @@
         <th data-sort="cacheWrite" data-type="client">Записано (кэш)</th>
         <th data-sort="generationTimeMs" data-type="client">Время</th>
         <th data-sort="apiKeyName" data-type="client">API Ключ</th>
+        <th>AI</th>
       </tr></thead>
       <tbody id="tableBody"></tbody>
     </table>
   </div>
-
-  <!-- Sessions View -->
-  <div class="sessions-wrap" id="sessionsWrap" style="display:none"></div>
-
-  <!-- Employee Monitor View -->
-  <div class="employee-wrap" id="employeeWrap" style="display:none"></div>
 
   <!-- Pagination -->
   <div class="pagination" id="pagination"></div>
