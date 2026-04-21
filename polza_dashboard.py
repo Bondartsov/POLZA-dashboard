@@ -33,6 +33,8 @@ from sync_worker import SyncWorker, sync_all_keys
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 sync_worker = None
 AUTH_TOKEN = ""
+LLM_MODEL = "anthropic/claude-haiku-4-5-20250414"  # overridden from .env in main()
+LLM_API_KEY = ""  # If empty, uses POLZA_API_KEY via Polza.AI proxy; overridden from .env in main()
 
 
 # ─── .env loader ─────────────────────────────────────────────────────────────────
@@ -988,7 +990,7 @@ def _summarize_single_session(session_id: str):
 
     # START_BLOCK_CALL_LLM
     llm_payload = {
-        "model": "anthropic/claude-haiku-4-5-20250414",
+        "model": LLM_MODEL,
         "messages": [
             {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
             {"role": "user", "content": f"Промпты из сессии (показаны первые 500 символов каждого):\n\n{total_text}"},
@@ -997,9 +999,10 @@ def _summarize_single_session(session_id: str):
         "temperature": 0.3,
     }
 
+    _llm_key = LLM_API_KEY or AUTH_TOKEN
     r = http_requests.post(
         f"{POLZA_API}/chat/completions",
-        headers={**_headers(AUTH_TOKEN), "Content-Type": "application/json"},
+        headers={**_headers(_llm_key), "Content-Type": "application/json"},
         json=llm_payload,
         timeout=60,
     )
@@ -1158,7 +1161,7 @@ def api_generation_summarize():
 
         # Call LLM
         llm_payload = {
-            "model": "anthropic/claude-haiku-4-5-20250414",
+            "model": LLM_MODEL,
             "messages": [
                 {"role": "system", "content": GEN_SUMMARIZE_PROMPT},
                 {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{total_text}"},
@@ -1167,9 +1170,10 @@ def api_generation_summarize():
             "temperature": 0.3,
         }
 
+        _llm_key = LLM_API_KEY or AUTH_TOKEN
         llm_r = http_requests.post(
             f"{POLZA_API}/chat/completions",
-            headers={**_headers(AUTH_TOKEN), "Content-Type": "application/json"},
+            headers={**_headers(_llm_key), "Content-Type": "application/json"},
             json=llm_payload,
             timeout=30,
         )
@@ -1340,7 +1344,7 @@ def api_session_summarize_stop():
 # ─── Main ─────────────────────────────────────────────────────────────────────────
 
 def main():
-    global AUTH_TOKEN, sync_worker
+    global AUTH_TOKEN, sync_worker, LLM_MODEL, LLM_API_KEY
 
     load_env()
     parser = argparse.ArgumentParser(description="Polza.AI Dashboard v3")
@@ -1350,6 +1354,10 @@ def main():
     args = parser.parse_args()
 
     AUTH_TOKEN = os.environ.get("POLZA_API_KEY", "")
+    LLM_MODEL = os.environ.get("LLM_MODEL", LLM_MODEL)
+    LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+
+    print(f"🧠 LLM config: model={LLM_MODEL}, key={'set' if LLM_API_KEY or AUTH_TOKEN else 'MISSING'}")
 
     # Init DB
     init_db()
