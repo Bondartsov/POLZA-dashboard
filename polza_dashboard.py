@@ -988,7 +988,7 @@ def _summarize_single_session(session_id: str):
 
     # START_BLOCK_CALL_LLM
     llm_payload = {
-        "model": "anthropic/claude-3-5-haiku-20241022",
+        "model": "anthropic/claude-haiku-4-5-20250414",
         "messages": [
             {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
             {"role": "user", "content": f"Промпты из сессии (показаны первые 500 символов каждого):\n\n{total_text}"},
@@ -1158,7 +1158,7 @@ def api_generation_summarize():
 
         # Call LLM
         llm_payload = {
-            "model": "anthropic/claude-3-5-haiku-20241022",
+            "model": "anthropic/claude-haiku-4-5-20250414",
             "messages": [
                 {"role": "system", "content": GEN_SUMMARIZE_PROMPT},
                 {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{total_text}"},
