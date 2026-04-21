@@ -165,6 +165,54 @@ class SessionSummary(Base):
 # ─── END_BLOCK_SESSION_SUMMARY
 
 
+# ─── START_BLOCK_GEN_SUMMARY
+# M-GEN-SUMMARY-STORE: LLM-generated per-generation summaries cache
+
+class GenerationSummary(Base):
+    """LLM-generated summary for a single generation (persistent cache)."""
+    __tablename__ = "generation_summaries"
+
+    generation_id = Column(String(100), primary_key=True)
+    summary = Column(Text)
+    topic = Column(String(255))
+    is_work = Column(Boolean)
+    project_guess = Column(String(500))
+    risk_flags = Column(Text)  # JSON array stored as text
+    llm_model = Column(String(255))
+    llm_cost = Column(Float, default=0.0)
+    cache_creation_tokens = Column(Integer, default=0)
+    cache_read_tokens = Column(Integer, default=0)
+    input_tokens = Column(Integer, default=0)
+    output_tokens = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_gensum_created", "created_at"),
+    )
+
+    def to_dict(self):
+        return {
+            "generationId": self.generation_id,
+            "summary": self.summary,
+            "topic": self.topic,
+            "isWork": self.is_work,
+            "projectGuess": self.project_guess,
+            "riskFlags": json.loads(self.risk_flags) if self.risk_flags else [],
+            "llmModel": self.llm_model,
+            "llmCost": self.llm_cost,
+            "cacheCreationTokens": self.cache_creation_tokens or 0,
+            "cacheReadTokens": self.cache_read_tokens or 0,
+            "inputTokens": self.input_tokens or 0,
+            "outputTokens": self.output_tokens or 0,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+            "cached": True,
+        }
+
+# ─── END_BLOCK_GEN_SUMMARY
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────────
 
 def init_db():
@@ -246,3 +294,95 @@ def summary_list_by_key(source_key: str, date_from=None, date_to=None):
         s.close()
 
 # ─── END_BLOCK_SUMMARY_CRUD
+
+
+# ─── START_BLOCK_GEN_SUMMARY_CRUD
+# M-GEN-SUMMARY-STORE: per-generation cache CRUD
+
+def gen_summary_get_or_none(generation_id: str):
+    """Fetch cached summary for a generation, or None."""
+    s = get_session()
+    try:
+        return s.query(GenerationSummary).filter(
+            GenerationSummary.generation_id == generation_id
+        ).first()
+    finally:
+        s.close()
+
+
+def gen_summary_get_many(generation_ids):
+    """Fetch multiple cached summaries by a list of generation IDs. Returns dict {id: dict}."""
+    if not generation_ids:
+        return {}
+    s = get_session()
+    try:
+        rows = s.query(GenerationSummary).filter(
+            GenerationSummary.generation_id.in_(list(generation_ids))
+        ).all()
+        return {row.generation_id: row.to_dict() for row in rows}
+    finally:
+        s.close()
+
+
+def gen_summary_upsert(generation_id, summary, topic, is_work,
+                       project_guess=None, risk_flags=None,
+                       llm_model=None, llm_cost=0.0,
+                       cache_creation_tokens=0, cache_read_tokens=0,
+                       input_tokens=0, output_tokens=0):
+    """INSERT or UPDATE summary for a generation_id."""
+    s = get_session()
+    try:
+        existing = s.query(GenerationSummary).filter(
+            GenerationSummary.generation_id == generation_id
+        ).first()
+        if existing:
+            existing.summary = summary
+            existing.topic = topic
+            existing.is_work = is_work
+            existing.project_guess = project_guess
+            existing.risk_flags = json.dumps(risk_flags or [], ensure_ascii=False)
+            existing.llm_model = llm_model
+            existing.llm_cost = llm_cost
+            existing.cache_creation_tokens = cache_creation_tokens
+            existing.cache_read_tokens = cache_read_tokens
+            existing.input_tokens = input_tokens
+            existing.output_tokens = output_tokens
+            existing.updated_at = datetime.utcnow()
+        else:
+            row = GenerationSummary(
+                generation_id=generation_id,
+                summary=summary,
+                topic=topic,
+                is_work=is_work,
+                project_guess=project_guess,
+                risk_flags=json.dumps(risk_flags or [], ensure_ascii=False),
+                llm_model=llm_model,
+                llm_cost=llm_cost,
+                cache_creation_tokens=cache_creation_tokens,
+                cache_read_tokens=cache_read_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+            s.add(row)
+        s.commit()
+        print(f"[GenSummaryStore][upsert] cached generation_id={generation_id[:16]}")
+    except Exception as e:
+        s.rollback()
+        print(f"[GenSummaryStore][upsert] ERROR: {e}")
+        raise
+    finally:
+        s.close()
+
+
+def gen_summary_delete(generation_id: str):
+    """Remove cached summary — triggers regeneration on next request."""
+    s = get_session()
+    try:
+        s.query(GenerationSummary).filter(
+            GenerationSummary.generation_id == generation_id
+        ).delete()
+        s.commit()
+    finally:
+        s.close()
+
+# ─── END_BLOCK_GEN_SUMMARY_CRUD

@@ -28,11 +28,21 @@ SYNC_INTERVAL = 300  # 5 minutes
 
 from db import init_db, get_session, ApiKey, Generation, engine
 from db import SessionSummary, summary_get_or_none, summary_upsert
+from db import (
+    GenerationSummary,
+    gen_summary_get_or_none,
+    gen_summary_get_many,
+    gen_summary_upsert,
+    gen_summary_delete,
+)
 from sync_worker import SyncWorker, sync_all_keys
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 sync_worker = None
 AUTH_TOKEN = ""
+LLM_API_URL = "https://api.anthropic.com/v1/messages"  # overridden from .env
+LLM_MODEL = "claude-haiku-4-5"  # Anthropic alias → always latest Haiku 4.5. Overridden from .env.
+LLM_API_KEY = ""  # Anthropic API key; overridden from .env
 
 
 # ─── .env loader ─────────────────────────────────────────────────────────────────
@@ -988,35 +998,60 @@ def _summarize_single_session(session_id: str):
 
     # START_BLOCK_CALL_LLM
     llm_payload = {
-        "model": "anthropic/claude-3-5-haiku-20241022",
+        "model": LLM_MODEL,
+        "max_tokens": 700,
+        "temperature": 0.3,
+        # cache_control on system prompt → Anthropic reuses cached prefix
+        "system": [
+            {
+                "type": "text",
+                "text": SUMMARIZE_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
         "messages": [
-            {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
             {"role": "user", "content": f"Промпты из сессии (показаны первые 500 символов каждого):\n\n{total_text}"},
         ],
-        "max_tokens": 500,
-        "temperature": 0.3,
     }
 
+    _llm_headers = {
+        "x-api-key": LLM_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
     r = http_requests.post(
-        f"{POLZA_API}/chat/completions",
-        headers={**_headers(AUTH_TOKEN), "Content-Type": "application/json"},
+        LLM_API_URL,
+        headers=_llm_headers,
         json=llm_payload,
         timeout=60,
     )
 
-    if r.status_code != 200:
-        raise ValueError(f"LLM_API_ERROR: HTTP {r.status_code}")
+    print(f"[Summarizer][LLM] Status: {r.status_code}")
 
-    llm_response = r.json()
+    if r.status_code != 200:
+        print(f"[Summarizer][LLM] Body: {r.text[:300]}")
+        raise ValueError(f"LLM_API_ERROR: HTTP {r.status_code} - {r.text[:100]}")
+
+    try:
+        llm_response = r.json()
+    except Exception as e:
+        print(f"[Summarizer][LLM] JSON parse error: {e}")
+        raise ValueError("LLM returned non-JSON response")
+
     llm_cost = 0.0
     try:
         usage = llm_response.get("usage", {})
-        # Estimate cost (Haiku pricing)
-        llm_cost = (usage.get("prompt_tokens", 0) * 0.0008 + usage.get("completion_tokens", 0) * 0.004) / 1000
-    except Exception:
+        llm_cost = (usage.get("input_tokens", 0) * 0.0008 + usage.get("output_tokens", 0) * 0.004) / 1000
+    except:
         pass
 
-    content = llm_response["choices"][0]["message"]["content"]
+    content = ""
+    for block in llm_response.get("content", []):
+        if block.get("type") == "text":
+            content += block.get("text", "")
+    if not content:
+        raise ValueError("LLM returned empty content")
+
     print(f"[Summarizer][summarize_session][BLOCK_CALL_LLM] LLM response received ({len(content)} chars)")
     # END_BLOCK_CALL_LLM
 
@@ -1060,10 +1095,10 @@ def _summarize_single_session(session_id: str):
     return result
 
 
-@app.route("/api/session/summarize", methods=["POST"])
+@app.route("/api/session/summarize", methods=["POST", "GET"])
 def api_session_summarize():
     """Summarize a single session — returns from cache or calls LLM."""
-    session_id = request.args.get("sessionId") or request.json.get("sessionId", "")
+    session_id = request.args.get("sessionId") or (request.json or {}).get("sessionId", "")
     if not session_id:
         return jsonify({"error": "sessionId required"}), 400
 
@@ -1072,14 +1107,308 @@ def api_session_summarize():
         return jsonify(result)
     except ValueError as e:
         err = str(e)
-        print(f"[Summarizer][summarize] ERROR: {err}")
+        print(f"[Summarizer][summarize] ERROR: {err} for session {session_id[:16]}")
         if err == "NO_GENERATIONS":
             return jsonify({"error": "У сессии нет генераций в БД", "code": "NO_GENERATIONS"}), 404
         if err == "NO_USER_MESSAGES":
             return jsonify({"error": "Не удалось получить промпты из логов", "code": "NO_USER_MESSAGES"}), 404
-        return jsonify({"error": err}), 500
+        return jsonify({"error": err, "sessionId": session_id}), 500
     except Exception as e:
-        print(f"[Summarizer][summarize] ERROR: {e}")
+        print(f"[Summarizer][summarize] CRITICAL ERROR: {e} for session {session_id[:16]}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error during summarization", "details": str(e), "sessionId": session_id}), 500
+
+
+# ─── Generation-level summarize (per single log) ──────────────────────────────────
+# START_BLOCK_GEN_SUMMARIZE_PROMPT
+# Extended prompt — asks for 3-5 sentence detailed summary instead of 1-2.
+
+GEN_SUMMARIZE_PROMPT = """Ты — аналитик корпоративного AI-мониторинга. Твоя задача — подробно описать,
+что делал сотрудник в этом запросе к AI-модели, и оценить его с точки зрения пользы для работы.
+
+Верни СТРОГО JSON в таком формате (без markdown, без комментариев, только JSON):
+
+{
+  "summary": "Подробное описание (3-5 предложений, русский). Укажи: (1) что сотрудник делает — конкретное действие/задача; (2) контекст или проект, если ясен; (3) используемые технологии/инструменты; (4) цель или ожидаемый результат. Избегай общих фраз — только конкретика из промпта.",
+  "topic": "Основная тема (2-5 слов, русский, например: 'Рефакторинг Python API', 'Отладка SQL', 'Документация React')",
+  "is_work": true,
+  "project_guess": "Название/описание проекта 1 фразой, если угадывается из кода или контекста. Иначе null.",
+  "risk_flags": []
+}
+
+Правила оценки:
+- is_work = true если запрос рабочий: код, документация, аналитика, тестирование, DevOps, обучение по теме работы.
+- is_work = false если личное: игры, развлечения, рецепты, гадания, личная переписка, домашние задания не по работе.
+- risk_flags — массив из перечисленных строк (включай только применимые):
+    * "personal"       — явно личное использование
+    * "off_hours"      — вне рабочего времени (не используй, время не передано)
+    * "unusual_model"  — запрос к странной/дорогой модели для простой задачи
+    * "high_cost"      — запрос явно дорогой/неоптимальный
+    * "sensitive"      — содержит чувствительные данные (пароли, персональные данные, секреты)
+
+Отвечай ТОЛЬКО JSON. Никаких пояснений до или после."""
+# END_BLOCK_GEN_SUMMARIZE_PROMPT
+
+
+# START_BLOCK_GEN_SUMMARIZE_HELPERS
+
+def _llm_call_summarize(user_text: str):
+    """
+    Call Anthropic API with prompt caching enabled.
+    Returns tuple (parsed_dict, usage_dict) or raises.
+    Uses cache_control on system prompt so repeated calls are ~10x cheaper.
+    """
+    llm_payload = {
+        "model": LLM_MODEL,
+        "max_tokens": 600,
+        "temperature": 0.2,
+        # System as array with cache_control → Anthropic caches this block.
+        # Even if token count is below min cache threshold, API accepts silently.
+        "system": [
+            {
+                "type": "text",
+                "text": GEN_SUMMARIZE_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        "messages": [
+            {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{user_text}"},
+        ],
+    }
+
+    _llm_headers = {
+        "x-api-key": LLM_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    llm_r = http_requests.post(
+        LLM_API_URL,
+        headers=_llm_headers,
+        json=llm_payload,
+        timeout=45,
+    )
+
+    if llm_r.status_code != 200:
+        raise ValueError(f"LLM HTTP {llm_r.status_code}: {llm_r.text[:300]}")
+
+    llm_response = llm_r.json()
+    llm_content = ""
+    for block in llm_response.get("content", []):
+        if block.get("type") == "text":
+            llm_content += block.get("text", "")
+
+    if not llm_content:
+        raise ValueError("LLM returned empty content")
+
+    # Parse JSON (handle markdown wrapping)
+    json_str = llm_content.strip()
+    if json_str.startswith("```"):
+        lines = json_str.split("\n")
+        json_str = "\n".join(lines[1:-1])
+    if json_str.startswith("json"):
+        json_str = json_str[4:].strip()
+
+    parsed = json.loads(json_str)
+
+    # Extract usage (including cache tokens)
+    usage = llm_response.get("usage", {}) or {}
+    usage_info = {
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+        "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+    }
+
+    # Compute cost: Haiku 4.5 pricing (USD per 1M tokens, approx):
+    #   input: $1.00, output: $5.00, cache_write: $1.25, cache_read: $0.10
+    # We store in USD for simplicity (frontend shows info only).
+    cost = (
+        usage_info["input_tokens"] * 1.0
+        + usage_info["output_tokens"] * 5.0
+        + usage_info["cache_creation_input_tokens"] * 1.25
+        + usage_info["cache_read_input_tokens"] * 0.10
+    ) / 1_000_000
+
+    usage_info["cost_usd"] = round(cost, 6)
+    return parsed, usage_info
+
+
+def _extract_user_text_from_log(log_data: dict, limit_chars: int = 4000) -> str:
+    """Extract concatenated user messages from a Polza generation log."""
+    msgs = log_data.get("request", {}).get("messages", [])
+    user_parts = []
+    for m in msgs:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "user" and content:
+            user_parts.append(str(content)[:1200])
+
+    total_text = "\n---\n".join(user_parts)[:limit_chars]
+
+    # Fallback: if no user role messages, take any non-empty content
+    if not total_text.strip():
+        for m in msgs:
+            content = m.get("content", "")
+            if content:
+                user_parts.append(str(content)[:1200])
+        total_text = "\n---\n".join(user_parts)[:limit_chars]
+
+    return total_text.strip()
+
+# END_BLOCK_GEN_SUMMARIZE_HELPERS
+
+
+@app.route("/api/generation/summarize", methods=["POST"])
+def api_generation_summarize():
+    """
+    Summarize a single generation by ID.
+    Flow: check DB cache → if miss, fetch log from Polza, call LLM, store in DB → return.
+    Optional query/body: ?force=1 to bypass cache and re-summarize.
+    """
+    data = request.get_json(silent=True) or {}
+    gen_id = data.get("generationId", "")
+    force = bool(data.get("force") or request.args.get("force"))
+    if not gen_id:
+        return jsonify({"error": "generationId required"}), 400
+
+    # START_BLOCK_GEN_CACHE_CHECK
+    if not force:
+        cached = gen_summary_get_or_none(gen_id)
+        if cached:
+            print(f"[GenSummarize][cache_hit] generation_id={gen_id[:16]}")
+            return jsonify(cached.to_dict())
+    # END_BLOCK_GEN_CACHE_CHECK
+
+    try:
+        token = _resolve_token_for_gen(gen_id)
+
+        # Fetch generation log from Polza
+        r = http_requests.get(
+            f"{POLZA_API}/history/generations/{gen_id}/log",
+            headers=_headers(token), timeout=30,
+        )
+        if r.status_code != 200:
+            return jsonify({
+                "topic": "Лог недоступен",
+                "summary": f"Не удалось получить лог генерации (HTTP {r.status_code}).",
+                "isWork": True, "generationId": gen_id, "cached": False,
+            }), 200
+
+        total_text = _extract_user_text_from_log(r.json(), limit_chars=4000)
+
+        if not total_text:
+            return jsonify({
+                "topic": "Пустой запрос",
+                "summary": "В логе нет текста промпта для анализа.",
+                "isWork": True, "generationId": gen_id, "cached": False,
+            }), 200
+
+        # START_BLOCK_GEN_CALL_LLM
+        print(f"[GenSummarize][LLM] model={LLM_MODEL} text_chars={len(total_text)}")
+        parsed, usage = _llm_call_summarize(total_text)
+        print(
+            f"[GenSummarize][LLM] ok "
+            f"input={usage['input_tokens']} output={usage['output_tokens']} "
+            f"cache_w={usage['cache_creation_input_tokens']} "
+            f"cache_r={usage['cache_read_input_tokens']} "
+            f"cost=${usage['cost_usd']:.6f}"
+        )
+        # END_BLOCK_GEN_CALL_LLM
+
+        # START_BLOCK_GEN_CACHE_STORE
+        try:
+            gen_summary_upsert(
+                generation_id=gen_id,
+                summary=parsed.get("summary", ""),
+                topic=parsed.get("topic", ""),
+                is_work=parsed.get("is_work", True),
+                project_guess=parsed.get("project_guess"),
+                risk_flags=parsed.get("risk_flags", []),
+                llm_model=LLM_MODEL,
+                llm_cost=usage["cost_usd"],
+                cache_creation_tokens=usage["cache_creation_input_tokens"],
+                cache_read_tokens=usage["cache_read_input_tokens"],
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+            )
+        except Exception as e:
+            print(f"[GenSummarize][cache_store] non-fatal: {e}")
+        # END_BLOCK_GEN_CACHE_STORE
+
+        return jsonify({
+            "generationId": gen_id,
+            "summary": parsed.get("summary", ""),
+            "topic": parsed.get("topic", ""),
+            "isWork": parsed.get("is_work", True),
+            "projectGuess": parsed.get("project_guess"),
+            "riskFlags": parsed.get("risk_flags", []),
+            "llmModel": LLM_MODEL,
+            "llmCost": usage["cost_usd"],
+            "cacheCreationTokens": usage["cache_creation_input_tokens"],
+            "cacheReadTokens": usage["cache_read_input_tokens"],
+            "inputTokens": usage["input_tokens"],
+            "outputTokens": usage["output_tokens"],
+            "cached": False,
+        })
+
+    except json.JSONDecodeError as e:
+        print(f"[GenSummarize] JSON decode error: {e}")
+        return jsonify({
+            "topic": "Ошибка разбора ответа LLM",
+            "summary": "Модель вернула невалидный JSON — попробуйте ещё раз.",
+            "isWork": True, "generationId": gen_id, "cached": False,
+        }), 200
+    except Exception as e:
+        print(f"[GenSummarize] ERROR: {e}")
+        return jsonify({
+            "error": str(e),
+            "topic": "Ошибка",
+            "summary": f"{e}",
+            "generationId": gen_id,
+            "cached": False,
+        }), 500
+
+
+@app.route("/api/generation-summaries", methods=["GET", "POST"])
+def api_generation_summaries_batch():
+    """
+    Batch-fetch cached summaries for a list of generation IDs.
+    Used by frontend to pre-populate the 🧠 badges on table render.
+    Input: {ids: [...]} (POST JSON) or ?ids=id1,id2,... (GET).
+    Output: {summaries: {id: {...}, ...}}
+    """
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        ids = data.get("ids") or []
+    else:
+        raw = request.args.get("ids", "")
+        ids = [x.strip() for x in raw.split(",") if x.strip()]
+
+    if not ids:
+        return jsonify({"summaries": {}})
+
+    # Cap to avoid huge queries
+    ids = ids[:500]
+    try:
+        found = gen_summary_get_many(ids)
+        return jsonify({"summaries": found})
+    except Exception as e:
+        print(f"[GenSummaries][batch] ERROR: {e}")
+        return jsonify({"summaries": {}, "error": str(e)}), 500
+
+
+@app.route("/api/generation/summary", methods=["DELETE"])
+def api_generation_summary_delete():
+    """Delete cached summary for a generation — forces regeneration next call."""
+    gen_id = request.args.get("generationId") or (request.get_json(silent=True) or {}).get("generationId", "")
+    if not gen_id:
+        return jsonify({"error": "generationId required"}), 400
+    try:
+        gen_summary_delete(gen_id)
+        return jsonify({"ok": True, "generationId": gen_id})
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
@@ -1212,7 +1541,7 @@ def api_session_summarize_stop():
 # ─── Main ─────────────────────────────────────────────────────────────────────────
 
 def main():
-    global AUTH_TOKEN, sync_worker
+    global AUTH_TOKEN, sync_worker, LLM_API_URL, LLM_MODEL, LLM_API_KEY
 
     load_env()
     parser = argparse.ArgumentParser(description="Polza.AI Dashboard v3")
@@ -1222,6 +1551,11 @@ def main():
     args = parser.parse_args()
 
     AUTH_TOKEN = os.environ.get("POLZA_API_KEY", "")
+    LLM_API_URL = os.environ.get("LLM_API_URL", LLM_API_URL)
+    LLM_MODEL = os.environ.get("LLM_MODEL", LLM_MODEL)
+    LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+
+    print(f"🧠 LLM config: url={LLM_API_URL}, model={LLM_MODEL}, key={'✅' if LLM_API_KEY else '❌ NOT SET'}")
 
     # Init DB
     init_db()
