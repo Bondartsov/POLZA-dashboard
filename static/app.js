@@ -12,6 +12,7 @@ const S = {
   keyNames: new Set(),
   balance: null,
   sessions: [], sessionsLoading: false, expandedSession: null,
+  employees: [], employeeReport: null, employeeLoading: false,
 };
 const KEY_COLORS = ['#6c7bf0','#4ade80','#f87171','#fbbf24','#60a5fa','#c084fc','#fb923c','#22d3ee','#f472b6','#a3e635','#f97316','#14b8a6'];
 const charts = {};
@@ -279,11 +280,19 @@ function setGroup(mode, btn) {
     document.getElementById('tableWrap').style.display = 'none';
     document.getElementById('pagination').style.display = 'none';
     document.getElementById('sessionsWrap').style.display = 'block';
+    document.getElementById('employeeWrap').style.display = 'none';
     loadSessions();
+  } else if (mode === 'employee') {
+    document.getElementById('tableWrap').style.display = 'none';
+    document.getElementById('pagination').style.display = 'none';
+    document.getElementById('sessionsWrap').style.display = 'none';
+    document.getElementById('employeeWrap').style.display = 'block';
+    loadEmployees();
   } else {
     document.getElementById('tableWrap').style.display = '';
     document.getElementById('pagination').style.display = '';
     document.getElementById('sessionsWrap').style.display = 'none';
+    document.getElementById('employeeWrap').style.display = 'none';
     renderTable();
   }
 }
@@ -785,3 +794,198 @@ async function backfillStop() {
   const data = await (await fetch('/api/sessions/backfill/status')).json();
   renderBackfillIndicator(data);
 }
+
+// ─── START_BLOCK_EMPLOYEE_UI
+// M-EMPLOYEE-UI: Employee Monitor — list + drill-down report
+
+async function loadEmployees() {
+  S.employeeLoading = true;
+  S.employeeReport = null;
+  renderEmployeeView();
+  try {
+    const params = getFilterParams();
+    const data = await apiGet('/api/employee-report/list?' + params);
+    S.employees = data.employees || [];
+    S.employeeLoading = false;
+    renderEmployeeView();
+  } catch(e) {
+    S.employeeLoading = false;
+    renderEmployeeView();
+  }
+}
+
+function renderEmployeeView() {
+  const el = document.getElementById('employeeWrap');
+  if (S.employeeLoading && !S.employees.length) {
+    el.innerHTML = '<div style="text-align:center;padding:32px"><div class="spinner"></div><br>Загрузка сотрудников...</div>';
+    return;
+  }
+  if (S.employeeReport) {
+    renderEmployeeReport(el);
+    return;
+  }
+
+  const totalCost = S.employees.reduce((s, e) => s + e.totalCost, 0);
+  const totalReqs = S.employees.reduce((s, e) => s + e.totalRequests, 0);
+
+  let html = `<div class="employee-header">
+    <span>📊 <b>${S.employees.length}</b> сотрудников · <b>${fmtNum(totalReqs)}</b> запросов · <b>${fmtCost(totalCost)}</b> ₽</span>
+    <button class="btn" style="font-size:11px" onclick="loadEmployees()">🔄 Обновить</button>
+  </div>`;
+
+  html += '<div class="employee-grid">';
+
+  // Total card
+  html += `<div class="employee-card employee-total" onclick="openEmployeeReport('')">
+    <div class="emp-name">📊 Все сотрудники</div>
+    <div class="emp-stats">
+      <div class="emp-stat"><span class="emp-val">${fmtCost(totalCost)}</span><span class="emp-lbl">₽ стоимость</span></div>
+      <div class="emp-stat"><span class="emp-val">${fmtNum(totalReqs)}</span><span class="emp-lbl">запросов</span></div>
+    </div>
+  </div>`;
+
+  for (const e of S.employees) {
+    const costClass = e.totalCost > 100 ? 'cost-high' : e.totalCost > 50 ? 'cost-medium' : '';
+    html += `<div class="employee-card" onclick="openEmployeeReport('${esc(e.name)}')">
+      <div class="emp-name">👤 ${esc(e.name)}</div>
+      <div class="emp-stats">
+        <div class="emp-stat"><span class="emp-val ${costClass}">${fmtCost(e.totalCost)}</span><span class="emp-lbl">₽</span></div>
+        <div class="emp-stat"><span class="emp-val">${fmtNum(e.totalRequests)}</span><span class="emp-lbl">зап.</span></div>
+        <div class="emp-stat"><span class="emp-val">${fmtNum(e.totalTokens)}</span><span class="emp-lbl">токенов</span></div>
+        <div class="emp-stat"><span class="emp-val">${e.sessionCount || 0}</span><span class="emp-lbl">сессий</span></div>
+      </div>
+    </div>`;
+  }
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+async function openEmployeeReport(name) {
+  S.employeeLoading = true;
+  S.employeeReport = null;
+  renderEmployeeView();
+
+  const el = document.getElementById('employeeWrap');
+  el.innerHTML = '<div style="text-align:center;padding:32px"><div class="spinner"></div><br>Загрузка отчёта...</div>';
+
+  try {
+    const params = getFilterParams();
+    if (name) params.set('employee', name);
+    else params.set('employee', '');
+    const data = await apiGet('/api/employee-report?' + params);
+    S.employeeReport = data;
+    S.employeeLoading = false;
+    renderEmployeeReport(el);
+  } catch(e) {
+    S.employeeLoading = false;
+    el.innerHTML = `<div style="padding:32px;color:var(--red)">❌ ${e.message}</div>`;
+  }
+}
+
+function renderEmployeeReport(el) {
+  const d = S.employeeReport;
+  if (!d) return;
+
+  const t = d.totals || {};
+  const anomalies = d.anomalies || [];
+  const sessions = d.sessions || [];
+  const heatmap = d.heatmap || [];
+  const models = d.models || [];
+
+  let html = `<div class="employee-header">
+    <button class="btn" onclick="S.employeeReport=null;renderEmployeeView()" style="font-size:11px">← Назад к списку</button>
+    <span>👤 <b>${esc(d.employee || 'Все сотрудники')}</b></span>
+    <button class="btn" style="font-size:11px" onclick="openEmployeeReport('${esc(d.employee)}')">🔄</button>
+  </div>`;
+
+  // Summary cards
+  html += '<div class="emp-report-summary">';
+  html += `<div class="summary-card"><div class="label">Стоимость</div><div class="value">${fmtCost(t.cost)} ₽</div></div>`;
+  html += `<div class="summary-card"><div class="label">Запросов</div><div class="value">${fmtNum(t.requests)}</div></div>`;
+  html += `<div class="summary-card"><div class="label">Сессий</div><div class="value">${fmtNum(t.sessions)}</div></div>`;
+  html += `<div class="summary-card"><div class="label">Токенов</div><div class="value">${fmtNum(t.tokens)}</div></div>`;
+  html += `<div class="summary-card"><div class="label">Кэш</div><div class="value">${t.tokens > 0 ? Math.round(t.cached / t.tokens * 100) : 0}%</div></div>`;
+  html += '</div>';
+
+  // Anomalies
+  if (anomalies.length) {
+    html += '<div class="emp-anomalies"><h4>⚠️ Аномалии</h4>';
+    for (const a of anomalies) {
+      const sevClass = 'anomaly-' + (a.severity || 'low');
+      html += `<div class="anomaly-badge ${sevClass}">
+        <span class="anomaly-type">${a.type}</span>
+        <span class="anomaly-details">${esc(a.details)}</span>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  // Heatmap
+  html += '<div class="emp-heatmap-section"><h4>🕐 Активность по часам</h4>';
+  html += renderHeatmap(heatmap);
+  html += '</div>';
+
+  // Models
+  if (models.length) {
+    html += '<div class="emp-models"><h4>🤖 Модели</h4><div class="emp-model-list">';
+    for (const m of models) {
+      const pct = t.requests > 0 ? Math.round(m.count / t.requests * 100) : 0;
+      html += `<div class="emp-model-item">
+        <span class="emp-model-name">${esc(m.name)}</span>
+        <div class="emp-model-bar"><div style="width:${pct}%;background:var(--accent1)"></div></div>
+        <span class="emp-model-count">${fmtNum(m.count)} (${pct}%)</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // Sessions table
+  html += '<div class="emp-sessions"><h4>💬 Сессии</h4>';
+  if (sessions.length) {
+    html += '<table class="emp-table"><thead><tr><th>ID</th><th>Период</th><th>Запросов</th><th>Стоимость</th><th>Модели</th></tr></thead><tbody>';
+    for (const s of sessions.slice(0, 50)) {
+      const sid = s.sessionId || '—';
+      const shortId = sid.length > 8 ? sid.slice(0, 8) + '…' : sid;
+      html += `<tr>
+        <td title="${esc(sid)}">${sid ? '💬 ' + shortId : '📋 Без сессии'}</td>
+        <td>${fmtDate(s.firstAt)} → ${fmtDate(s.lastAt)}</td>
+        <td>${fmtNum(s.totalCount)}</td>
+        <td class="cost">${fmtCost(s.totalCost)} ₽</td>
+        <td>${(s.models || []).map(m => '<span class="badge">' + esc(m) + '</span>').join(' ')}</td>
+      </tr>`;
+    }
+    if (sessions.length > 50) html += `<tr><td colspan="5" style="text-align:center;color:var(--text2)">…и ещё ${sessions.length - 50} сессий</td></tr>`;
+    html += '</tbody></table>';
+  } else {
+    html += '<div style="padding:16px;color:var(--text2);text-align:center">Нет данных о сессиях</div>';
+  }
+  html += '</div>';
+
+  el.innerHTML = html;
+}
+
+function renderHeatmap(data) {
+  if (!data || !data.length) return '<div style="color:var(--text2)">Нет данных</div>';
+  const days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+  const maxVal = Math.max(1, ...data.flat());
+
+  let html = '<div class="heatmap-grid">';
+  html += '<div class="heatmap-header"><div class="heatmap-corner"></div>';
+  for (let h = 0; h < 24; h++) html += `<div class="heatmap-hlabel">${h}</div>`;
+  html += '</div>';
+
+  for (let d = 0; d < 7; d++) {
+    html += `<div class="heatmap-row"><div class="heatmap-dlabel">${days[d]}</div>`;
+    for (let h = 0; h < 24; h++) {
+      const val = data[d][h] || 0;
+      const intensity = val / maxVal;
+      const bg = val === 0 ? 'var(--bg3)' : `rgba(108,123,240,${0.15 + intensity * 0.85})`;
+      html += `<div class="heatmap-cell" style="background:${bg}" title="${days[d]} ${h}:00 — ${val} запросов">${val || ''}</div>`;
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// ─── END_BLOCK_EMPLOYEE_UI

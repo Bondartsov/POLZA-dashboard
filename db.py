@@ -9,9 +9,10 @@ START_MODULE_CONTRACT
   LINKS: M-DB
 END_MODULE_CONTRACT
 """
+import json
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, String, Integer, Float, Boolean, DateTime, JSON, Index
+from sqlalchemy import create_engine, Column, String, Integer, Float, Boolean, DateTime, JSON, Index, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = os.environ.get(
@@ -127,6 +128,43 @@ class Generation(Base):
         }
 
 
+# ─── START_BLOCK_SESSION_SUMMARY
+# M-SUMMARY-STORE: LLM-generated session summaries cache
+
+class SessionSummary(Base):
+    """LLM-generated summary for a chat session."""
+    __tablename__ = "session_summaries"
+
+    session_id = Column(String(100), primary_key=True)
+    source_key = Column(String(255))
+    summary = Column(Text)
+    topic = Column(String(255))
+    is_work = Column(Boolean)
+    project_guess = Column(String(255))
+    risk_flags = Column(Text)  # JSON array stored as text
+    prompt_hashes = Column(Text)  # JSON array stored as text
+    llm_cost = Column(Float, default=0.0)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "sessionId": self.session_id,
+            "sourceKey": self.source_key,
+            "summary": self.summary,
+            "topic": self.topic,
+            "isWork": self.is_work,
+            "projectGuess": self.project_guess,
+            "riskFlags": json.loads(self.risk_flags) if self.risk_flags else [],
+            "promptHashes": json.loads(self.prompt_hashes) if self.prompt_hashes else [],
+            "llmCost": self.llm_cost,
+            "createdAt": self.created_at.isoformat() if self.created_at else None,
+            "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+# ─── END_BLOCK_SESSION_SUMMARY
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────────
 
 def init_db():
@@ -136,3 +174,75 @@ def init_db():
 
 def get_session():
     return SessionLocal()
+
+
+# ─── START_BLOCK_SUMMARY_CRUD
+# M-SUMMARY-STORE: CRUD operations
+
+def summary_get_or_none(session_id: str):
+    """Get summary by session_id, return None if not cached."""
+    s = get_session()
+    try:
+        return s.query(SessionSummary).filter(
+            SessionSummary.session_id == session_id
+        ).first()
+    finally:
+        s.close()
+
+
+def summary_upsert(session_id, source_key, summary, topic, is_work,
+                   project_guess=None, risk_flags=None,
+                   prompt_hashes=None, llm_cost=0.0):
+    """INSERT or UPDATE summary for a session_id."""
+    s = get_session()
+    try:
+        existing = s.query(SessionSummary).filter(
+            SessionSummary.session_id == session_id
+        ).first()
+        if existing:
+            existing.source_key = source_key
+            existing.summary = summary
+            existing.topic = topic
+            existing.is_work = is_work
+            existing.project_guess = project_guess
+            existing.risk_flags = json.dumps(risk_flags or [], ensure_ascii=False)
+            existing.prompt_hashes = json.dumps(prompt_hashes or [], ensure_ascii=False)
+            existing.llm_cost = llm_cost
+            existing.updated_at = datetime.utcnow()
+        else:
+            row = SessionSummary(
+                session_id=session_id,
+                source_key=source_key,
+                summary=summary,
+                topic=topic,
+                is_work=is_work,
+                project_guess=project_guess,
+                risk_flags=json.dumps(risk_flags or [], ensure_ascii=False),
+                prompt_hashes=json.dumps(prompt_hashes or [], ensure_ascii=False),
+                llm_cost=llm_cost,
+            )
+            s.add(row)
+        s.commit()
+        print(f"[SummaryStore][upsert] cached session_id={session_id[:16]}")
+    except Exception as e:
+        s.rollback()
+        print(f"[SummaryStore][upsert] ERROR: {e}")
+        raise
+    finally:
+        s.close()
+
+
+def summary_list_by_key(source_key: str, date_from=None, date_to=None):
+    """List summaries for an employee within date range."""
+    s = get_session()
+    try:
+        q = s.query(SessionSummary).filter(SessionSummary.source_key == source_key)
+        if date_from:
+            q = q.filter(SessionSummary.created_at >= date_from)
+        if date_to:
+            q = q.filter(SessionSummary.created_at <= date_to)
+        return q.all()
+    finally:
+        s.close()
+
+# ─── END_BLOCK_SUMMARY_CRUD

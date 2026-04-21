@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 3.1.0 -->
+<!-- VERSION: 3.2.0 -->
 
-<KnowledgeGraph project="polza-dashboard" version="3.1.0">
+<KnowledgeGraph project="polza-dashboard" version="3.2.0">
 
   <M-APP NAME="Flask App" TYPE="ENTRY_POINT">
     <purpose>Flask web-server v3: DB-backed API + proxy for detail/log + background backfill</purpose>
     <path>polza_dashboard.py</path>
-    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL</depends>
+    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-ANOMALY, M-EMPLOYEE-REPORT</depends>
     <annotations>
       <fn-index PURPOSE="Serve index.html" />
       <fn-config PURPOSE="Auth config + keys from DB + sync status" />
@@ -21,18 +21,24 @@
       <fn-balance PURPOSE="Account balance proxy" />
       <fn-health PURPOSE="DB health check" />
       <fn-sessions PURPOSE="GET /api/db/sessions — aggregated session data" />
+      <fn-employee_list PURPOSE="GET /api/employee-report/list — all employees with aggregated cost/tokens/requests" />
+      <fn-employee_report PURPOSE="GET /api/employee-report — single employee report with sessions, anomalies, heatmap" />
     </annotations>
   </M-APP>
 
   <M-DB NAME="Database Layer" TYPE="DATA_LAYER">
-    <purpose>SQLAlchemy ORM: api_keys + generations tables in PostgreSQL. Generations includes session_id, device_id columns</purpose>
+    <purpose>SQLAlchemy ORM: api_keys + generations + session_summaries tables in PostgreSQL</purpose>
     <path>db.py</path>
     <depends>M-APP</depends>
     <annotations>
       <m-api_keys PURPOSE="Registered API keys with sync metadata (last_sync_at, total_synced)" />
-      <m-generations PURPOSE="Cached generation records: includes session_id (VARCHAR 100), device_id (VARCHAR 128), idx_gen_session_id index" />
-      <fn-init_db PURPOSE="Create tables on startup" />
-      <fn-to_dict PURPOSE="Serialize Generation to API-compatible JSON — includes _sessionId, _deviceId" />
+      <m-generations PURPOSE="Cached generation records: includes session_id, device_id, source_key_name" />
+      <m-session_summaries PURPOSE="LLM summaries cache: session_id PK, source_key, summary, topic, is_work, project_guess, risk_flags, llm_cost" />
+      <fn-init_db PURPOSE="Create tables on startup (including session_summaries)" />
+      <fn-to_dict PURPOSE="Serialize Generation to API-compatible JSON" />
+      <fn-summary_get_or_none PURPOSE="Get summary by session_id, None if not cached" />
+      <fn-summary_upsert PURPOSE="INSERT or UPDATE summary for a session" />
+      <fn-summary_list_by_key PURPOSE="List summaries for employee in date range" />
     </annotations>
   </M-DB>
 
@@ -91,6 +97,56 @@
       <fn-theme PURPOSE="Dark/light theme toggle with localStorage" />
     </annotations>
   </M-STATIC>
+
+  <M-SUMMARY-STORE NAME="Session Summary Store" TYPE="DATA_LAYER">
+    <purpose>SQLAlchemy model + CRUD for session_summaries table — caches LLM summaries per session</purpose>
+    <path>db.py</path>
+    <depends>M-DB</depends>
+    <annotations>
+      <m-session_summaries PURPOSE="ORM model: session_id PK, source_key, summary, topic, is_work, project_guess, risk_flags, llm_cost, timestamps" />
+      <fn-summary_get_or_none PURPOSE="Get summary by session_id, return None if not cached" />
+      <fn-summary_upsert PURPOSE="INSERT or UPDATE summary for a session_id" />
+      <fn-summary_list_by_key PURPOSE="List summaries for an employee within date range" />
+      <log-prefix>[SummaryStore]</log-prefix>
+    </annotations>
+  </M-SUMMARY-STORE>
+
+  <M-ANOMALY NAME="Anomaly Detector" TYPE="CORE_LOGIC">
+    <purpose>Detect suspicious usage patterns: off-hours, weekends, unusual models, burst activity</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-DB</depends>
+    <annotations>
+      <fn-detect PURPOSE="Analyze employee records, return anomaly list with type/severity/details" />
+      <rule-OFF_HOURS PURPOSE="22:00-08:00 — severity based on count (low/medium/high)" />
+      <rule-WEEKEND PURPOSE="Saturday/Sunday — severity by count" />
+      <rule-UNUSUAL_MODEL PURPOSE="Model not in employee top 3" />
+      <rule-BURST_50_PLUS PURPOSE=">50 generations in 1-hour window" />
+      <log-prefix>[Anomaly]</log-prefix>
+    </annotations>
+  </M-ANOMALY>
+
+  <M-EMPLOYEE-REPORT NAME="Employee Report API" TYPE="ENTRY_POINT">
+    <purpose>Fast aggregated report per employee — pure SQL, no AI, instant response</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-DB, M-SUMMARY-STORE, M-ANOMALY</depends>
+    <annotations>
+      <fn-report_list PURPOSE="GET /api/employee-report/list — summary: each employee with cost/tokens/requests" />
+      <fn-report PURPOSE="GET /api/employee-report — single employee: sessions, anomalies, heatmap, models" />
+      <log-prefix>[EmployeeReport]</log-prefix>
+    </annotations>
+  </M-EMPLOYEE-REPORT>
+
+  <M-EMPLOYEE-UI NAME="Employee Monitor UI" TYPE="UI_COMPONENT">
+    <purpose>Frontend: employee list with costs, drill-down report with sessions, anomalies, heatmap</purpose>
+    <path>static/app.js, static/index.html, static/style.css</path>
+    <depends>M-STATIC</depends>
+    <annotations>
+      <fn-load_employees PURPOSE="Load employee list with aggregated costs for period" />
+      <fn-render_employee_report PURPOSE="Render full report: summary cards, anomalies, heatmap, models, sessions" />
+      <fn-render_heatmap PURPOSE="Render hourly activity heatmap grid (weekday x hour)" />
+      <tab-PAGE="📊 По сотрудникам" />
+    </annotations>
+  </M-EMPLOYEE-UI>
 
   <Constraints>
     <constraint-sort>Polza.AI API supports only sortBy=createdAt|clientCost; DB supports all columns</constraint-sort>
