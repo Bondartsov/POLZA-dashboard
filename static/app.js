@@ -940,21 +940,33 @@ function renderEmployeeReport(el) {
   }
 
   // Sessions table
-  html += '<div class="emp-sessions"><h4>💬 Сессии</h4>';
+  const uncachedSessions = sessions.filter(s => s.sessionId && !s._summary);
+  const hasSessions = sessions.some(s => s.sessionId);
+  html += '<div class="emp-sessions"><div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><h4 style="margin:0">💬 Сессии</h4>';
+  if (hasSessions && d.employee) {
+    html += `<button class="btn btn-summarize-all" id="btnSummarizeAll" onclick="summarizeAllForEmployee('${esc(d.employee)}')" style="font-size:11px">🧠 Суммаризировать все (${uncachedSessions.length})</button>`;
+    html += `<span class="summarize-progress" id="summarizeProgress" style="display:none;font-size:11px;color:var(--text2)"></span>`;
+  }
+  html += '</div>';
   if (sessions.length) {
-    html += '<table class="emp-table"><thead><tr><th>ID</th><th>Период</th><th>Запросов</th><th>Стоимость</th><th>Модели</th></tr></thead><tbody>';
+    html += '<table class="emp-table"><thead><tr><th>ID</th><th>Период</th><th>Запросов</th><th>Стоимость</th><th>Модели</th><th>Summary</th></tr></thead><tbody>';
     for (const s of sessions.slice(0, 50)) {
-      const sid = s.sessionId || '—';
+      const sid = s.sessionId || '';
       const shortId = sid.length > 8 ? sid.slice(0, 8) + '…' : sid;
+      const summaryHtml = sid ?
+        (s._summary ? `<div class="summary-badge ${s._summary.isWork ? 'work' : 'personal'}"><b>${esc(s._summary.topic || '?')}</b><br><span style="font-size:10px">${esc(s._summary.summary || '').slice(0, 80)}${(s._summary.summary||'').length > 80 ? '…' : ''}</span></div>` :
+        `<button class="btn btn-summarize" onclick="summarizeSession('${sid}',this)" style="font-size:10px;padding:2px 8px">🧠</button>`) :
+        '<span style="color:var(--text2)">—</span>';
       html += `<tr>
         <td title="${esc(sid)}">${sid ? '💬 ' + shortId : '📋 Без сессии'}</td>
         <td>${fmtDate(s.firstAt)} → ${fmtDate(s.lastAt)}</td>
         <td>${fmtNum(s.totalCount)}</td>
         <td class="cost">${fmtCost(s.totalCost)} ₽</td>
         <td>${(s.models || []).map(m => '<span class="badge">' + esc(m) + '</span>').join(' ')}</td>
+        <td>${summaryHtml}</td>
       </tr>`;
     }
-    if (sessions.length > 50) html += `<tr><td colspan="5" style="text-align:center;color:var(--text2)">…и ещё ${sessions.length - 50} сессий</td></tr>`;
+    if (sessions.length > 50) html += `<tr><td colspan="6" style="text-align:center;color:var(--text2)">…и ещё ${sessions.length - 50} сессий</td></tr>`;
     html += '</tbody></table>';
   } else {
     html += '<div style="padding:16px;color:var(--text2);text-align:center">Нет данных о сессиях</div>';
@@ -989,3 +1001,119 @@ function renderHeatmap(data) {
 }
 
 // ─── END_BLOCK_EMPLOYEE_UI
+
+// ─── START_BLOCK_SUMMARIZE_UI
+// M-SESSION-SUMMARIZER: Frontend — Summarize buttons + background polling
+
+async function summarizeSession(sessionId, btnEl) {
+  if (!btnEl) return;
+  btnEl.disabled = true;
+  btnEl.textContent = '⏳...';
+  try {
+    const r = await fetch('/api/session/summarize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sessionId}),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      btnEl.textContent = '❌';
+      btnEl.title = data.error || 'Error';
+      btnEl.disabled = false;
+      return;
+    }
+    // Replace button with summary badge
+    const td = btnEl.closest('td');
+    if (td && data.topic) {
+      const isWork = data.isWork !== false;
+      td.innerHTML = `<div class="summary-badge ${isWork ? 'work' : 'personal'}"><b>${esc(data.topic)}</b><br><span style="font-size:10px">${esc(data.summary || '').slice(0, 80)}${(data.summary||'').length > 80 ? '…' : ''}</span></div>`;
+    } else if (td) {
+      td.innerHTML = `<span style="color:var(--text2);font-size:10px">✅ OK</span>`;
+    }
+  } catch(e) {
+    btnEl.textContent = '❌';
+    btnEl.title = e.message;
+    btnEl.disabled = false;
+  }
+}
+
+let _summarizePollTimer = null;
+
+async function summarizeAllForEmployee(employee) {
+  const btn = document.getElementById('btnSummarizeAll');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Запуск...'; }
+  try {
+    const r = await fetch('/api/session/summarize-all?employee=' + encodeURIComponent(employee), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+    });
+    const data = await r.json();
+    if (data.status === 'already_running') {
+      if (btn) { btn.textContent = '⏳ Уже запущен'; btn.disabled = true; }
+    } else {
+      if (btn) btn.textContent = '⏳ Обработка...';
+    }
+    startSummarizePoll(employee);
+  } catch(e) {
+    if (btn) { btn.textContent = '❌ Ошибка'; btn.disabled = false; }
+  }
+}
+
+function startSummarizePoll(employee) {
+  if (_summarizePollTimer) return;
+  _summarizePollTimer = setInterval(() => pollSummarizeStatus(employee), 2000);
+  pollSummarizeStatus(employee);
+}
+
+function stopSummarizePoll() {
+  if (_summarizePollTimer) { clearInterval(_summarizePollTimer); _summarizePollTimer = null; }
+}
+
+async function pollSummarizeStatus(employee) {
+  const prog = document.getElementById('summarizeProgress');
+  const btn = document.getElementById('btnSummarizeAll');
+  try {
+    const data = await (await fetch('/api/session/summarize/status')).json();
+    if (!data.running) {
+      stopSummarizePoll();
+      if (prog) { prog.style.display = 'none'; }
+      if (btn) { btn.disabled = false; btn.textContent = `🧠 Суммаризировать`; }
+      // Refresh report
+      if (data.done > 0 && employee) openEmployeeReport(employee);
+      return;
+    }
+    const pct = data.total > 0 ? Math.round(data.done / data.total * 100) : 0;
+    if (prog) {
+      prog.style.display = 'inline';
+      prog.innerHTML = `⏳ ${data.done}/${data.total} сессий (${pct}%) · ошибок: ${data.errors}`;
+    }
+    if (btn) btn.textContent = `⏳ ${data.done}/${data.total}...`;
+    // Update topbar indicator
+    renderSummarizeIndicator(data);
+  } catch(e) { /* ignore */ }
+}
+
+function renderSummarizeIndicator(d) {
+  let el = document.getElementById('summarizeIndicator');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'summarizeIndicator';
+    el.className = 'backfill-indicator';
+    el.onclick = () => {}; // click to see details
+    document.querySelector('.topbar').appendChild(el);
+  }
+  if (!d.running && d.done === 0) {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'flex';
+  const pct = d.total > 0 ? Math.round(d.done / d.total * 100) : 0;
+  if (d.running) {
+    el.innerHTML = `<span>🧠</span><span><b>Summarize:</b> ${d.done}/${d.total} (${pct}%) — ${esc(d.employee || '')}</span>`;
+  } else {
+    el.innerHTML = `<span>✅</span><span><b>Summarize завершён:</b> ${d.done} сессий, ${d.errors} ошибок</span>`;
+    setTimeout(() => { el.style.display = 'none'; }, 8000);
+  }
+}
+
+// ─── END_BLOCK_SUMMARIZE_UI

@@ -27,6 +27,7 @@ POLZA_API = "https://polza.ai/api/v1"
 SYNC_INTERVAL = 300  # 5 minutes
 
 from db import init_db, get_session, ApiKey, Generation, engine
+from db import SessionSummary, summary_get_or_none, summary_upsert
 from sync_worker import SyncWorker, sync_all_keys
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
@@ -845,6 +846,11 @@ def api_employee_report():
             s["firstAt"] = s["firstAt"].isoformat() if s["firstAt"] else None
             s["lastAt"] = s["lastAt"].isoformat() if s["lastAt"] else None
             s["totalCost"] = float(s["totalCost"])
+            # Attach cached summary if exists
+            if sid:
+                cached_summary = summary_get_or_none(sid)
+                if cached_summary:
+                    s["_summary"] = cached_summary.to_dict()
             sessions.append(s)
         sessions.sort(key=lambda x: x["lastAt"] or "", reverse=True)
 
@@ -883,6 +889,324 @@ def api_employee_report():
         dbs.close()
 
 # ─── END_BLOCK_EMPLOYEE_REPORT
+
+
+# ─── START_BLOCK_SESSION_SUMMARIZER
+# M-SESSION-SUMMARIZER: LLM-powered session summarization + background thread
+
+# Summarize-all state (same pattern as backfill)
+_summarize = {
+    'running': False,
+    'done': 0,
+    'total': 0,
+    'errors': 0,
+    'error_msg': None,
+    'last_update': None,
+    'started_at': None,
+    'stop_requested': False,
+    'thread': None,
+    'lock': threading.Lock(),
+    'employee': None,
+}
+
+SUMMARIZE_SYSTEM_PROMPT = """Ты — аналитик корпоративного AI-мониторинга. Проанализируй промпты пользователя из сессии чата и верни СТРОГО JSON:
+
+{
+  "summary": "Краткое описание задач (1-3 предложения, русский)",
+  "topic": "Основная тема (2-4 слова, русский)",
+  "is_work": true,
+  "project_guess": "Предположение о проекте (если понятно)",
+  "risk_flags": []
+}
+
+Правила:
+- is_work = true если задачи выглядят рабочими (код, аналитика, документация, тестирование)
+- is_work = false если похоже на личное использование (игры, рецепты, личные письма)
+- risk_flags: массив строк — "off_hours", "personal", "unusual_model", "high_cost"
+- Отвечай ТОЛЬКО JSON, без markdown, без пояснений"""
+
+
+def _summarize_single_session(session_id: str):
+    """
+    Summarize a single session: check cache → fetch logs → call LLM → cache result.
+    Returns dict with summary data or raises Exception.
+    """
+    # START_BLOCK_SUMMARY_CACHE_CHECK
+    cached = summary_get_or_none(session_id)
+    if cached:
+        print(f"[Summarizer][cache_hit] session_id={session_id[:16]}")
+        return cached.to_dict()
+    # END_BLOCK_SUMMARY_CACHE_CHECK
+
+    # START_BLOCK_FETCH_LOGS
+    dbs = get_session()
+    try:
+        gens = dbs.query(Generation).filter(
+            Generation.session_id == session_id
+        ).order_by(desc(Generation.created_at_api)).all()
+
+        if not gens:
+            raise ValueError("NO_GENERATIONS")
+
+        source_key = gens[0].source_key_name or ""
+
+        # Resolve token for this session's key
+        key_row = dbs.query(ApiKey).filter(
+            ApiKey.name == source_key
+        ).first()
+        token = key_row.token if key_row else AUTH_TOKEN
+
+        # Fetch user messages from generation logs
+        user_messages = []
+        for gen in gens[:20]:  # limit to 20 generations
+            try:
+                r = http_requests.get(
+                    f"{POLZA_API}/history/generations/{gen.id}/log",
+                    headers=_headers(token), timeout=30
+                )
+                if r.status_code != 200:
+                    continue
+                log_data = r.json()
+                msgs = log_data.get("request", {}).get("messages", [])
+                for m in msgs:
+                    if m.get("role") == "user" and m.get("content"):
+                        content = m["content"]
+                        if isinstance(content, str) and len(content) > 10:
+                            user_messages.append(content[:500])
+            except Exception as e:
+                print(f"[Summarizer][fetch_log] skip {gen.id[:16]}: {e}")
+                continue
+    finally:
+        dbs.close()
+    # END_BLOCK_FETCH_LOGS
+
+    if not user_messages:
+        raise ValueError("NO_USER_MESSAGES")
+
+    # Truncate total text to ~3000 chars for LLM
+    total_text = "\n---\n".join(user_messages)[:3000]
+
+    # START_BLOCK_CALL_LLM
+    llm_payload = {
+        "model": "anthropic/claude-3-5-haiku-20241022",
+        "messages": [
+            {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Промпты из сессии (показаны первые 500 символов каждого):\n\n{total_text}"},
+        ],
+        "max_tokens": 500,
+        "temperature": 0.3,
+    }
+
+    r = http_requests.post(
+        f"{POLZA_API}/chat/completions",
+        headers={**_headers(AUTH_TOKEN), "Content-Type": "application/json"},
+        json=llm_payload,
+        timeout=60,
+    )
+
+    if r.status_code != 200:
+        raise ValueError(f"LLM_API_ERROR: HTTP {r.status_code}")
+
+    llm_response = r.json()
+    llm_cost = 0.0
+    try:
+        usage = llm_response.get("usage", {})
+        # Estimate cost (Haiku pricing)
+        llm_cost = (usage.get("prompt_tokens", 0) * 0.0008 + usage.get("completion_tokens", 0) * 0.004) / 1000
+    except Exception:
+        pass
+
+    content = llm_response["choices"][0]["message"]["content"]
+    print(f"[Summarizer][summarize_session][BLOCK_CALL_LLM] LLM response received ({len(content)} chars)")
+    # END_BLOCK_CALL_LLM
+
+    # START_BLOCK_PARSE_RESPONSE
+    # Extract JSON from response (handle markdown wrapping)
+    json_str = content.strip()
+    if json_str.startswith("```"):
+        lines = json_str.split("\n")
+        json_str = "\n".join(lines[1:-1])
+    if json_str.startswith("json"):
+        json_str = json_str[4:].strip()
+
+    parsed = json.loads(json_str)
+    print(f"[Summarizer][summarize_session][BLOCK_PARSE_RESPONSE] parsed OK: topic={parsed.get('topic', '?')}")
+    # END_BLOCK_PARSE_RESPONSE
+
+    # Cache result
+    summary_upsert(
+        session_id=session_id,
+        source_key=source_key,
+        summary=parsed.get("summary", ""),
+        topic=parsed.get("topic", ""),
+        is_work=parsed.get("is_work", True),
+        project_guess=parsed.get("project_guess"),
+        risk_flags=parsed.get("risk_flags", []),
+        prompt_hashes=None,
+        llm_cost=llm_cost,
+    )
+
+    result = {
+        "sessionId": session_id,
+        "sourceKey": source_key,
+        "summary": parsed.get("summary", ""),
+        "topic": parsed.get("topic", ""),
+        "isWork": parsed.get("is_work", True),
+        "projectGuess": parsed.get("project_guess"),
+        "riskFlags": parsed.get("risk_flags", []),
+        "llmCost": llm_cost,
+        "cached": False,
+    }
+    return result
+
+
+@app.route("/api/session/summarize", methods=["POST"])
+def api_session_summarize():
+    """Summarize a single session — returns from cache or calls LLM."""
+    session_id = request.args.get("sessionId") or request.json.get("sessionId", "")
+    if not session_id:
+        return jsonify({"error": "sessionId required"}), 400
+
+    try:
+        result = _summarize_single_session(session_id)
+        return jsonify(result)
+    except ValueError as e:
+        err = str(e)
+        print(f"[Summarizer][summarize] ERROR: {err}")
+        if err == "NO_GENERATIONS":
+            return jsonify({"error": "У сессии нет генераций в БД", "code": "NO_GENERATIONS"}), 404
+        if err == "NO_USER_MESSAGES":
+            return jsonify({"error": "Не удалось получить промпты из логов", "code": "NO_USER_MESSAGES"}), 404
+        return jsonify({"error": err}), 500
+    except Exception as e:
+        print(f"[Summarizer][summarize] ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def _summarize_all_worker(employee: str):
+    """Background thread: summarize all sessions without summary for an employee."""
+    print(f"[Summarizer][summarize_all_worker] started for {employee}")
+    while True:
+        with _summarize['lock']:
+            if _summarize['stop_requested']:
+                _summarize['running'] = False
+                print("[Summarizer] Stopped by request")
+                return
+
+        dbs = get_session()
+        try:
+            # Find sessions without summary for this employee
+            sessions_with_gens = dbs.query(
+                Generation.session_id,
+            ).filter(
+                Generation.source_key_name == employee,
+                Generation.session_id.isnot(None),
+                Generation.session_id != "",
+            ).group_by(Generation.session_id).all()
+
+            # Filter out sessions that already have summaries
+            uncached = []
+            for (sid,) in sessions_with_gens:
+                if not summary_get_or_none(sid):
+                    uncached.append(sid)
+
+            if not uncached:
+                with _summarize['lock']:
+                    _summarize['running'] = False
+                    _summarize['last_update'] = datetime.now(timezone.utc).isoformat()
+                print(f"[Summarizer][summarize_all_worker] done — no more sessions for {employee}")
+                return
+
+            with _summarize['lock']:
+                _summarize['total'] = len(uncached) + _summarize['done']
+
+            for sid in uncached:
+                with _summarize['lock']:
+                    if _summarize['stop_requested']:
+                        _summarize['running'] = False
+                        print("[Summarizer] Stopped mid-batch")
+                        return
+
+                try:
+                    _summarize_single_session(sid)
+                    with _summarize['lock']:
+                        _summarize['done'] += 1
+                        _summarize['last_update'] = datetime.now(timezone.utc).isoformat()
+                except Exception as e:
+                    with _summarize['lock']:
+                        _summarize['errors'] += 1
+                        _summarize['last_update'] = datetime.now(timezone.utc).isoformat()
+                    print(f"[Summarizer][summarize_all_worker] session {sid[:16]} error: {e}")
+
+                time.sleep(1)  # polite delay between LLM calls
+
+        except Exception as e:
+            with _summarize['lock']:
+                _summarize['error_msg'] = str(e)
+                _summarize['running'] = False
+            print(f"[Summarizer][summarize_all_worker] fatal: {e}")
+            return
+        finally:
+            dbs.close()
+
+        break  # one pass is enough
+
+    with _summarize['lock']:
+        _summarize['running'] = False
+    print(f"[Summarizer][summarize_all_worker] completed for {employee}")
+
+
+@app.route("/api/session/summarize-all", methods=["POST"])
+def api_session_summarize_all():
+    """Start background summarization for all sessions of an employee."""
+    employee = request.args.get("employee") or request.json.get("employee", "")
+    if not employee:
+        return jsonify({"error": "employee required"}), 400
+
+    with _summarize['lock']:
+        if _summarize['running']:
+            return jsonify({"status": "already_running", "employee": _summarize['employee']})
+        _summarize['running'] = True
+        _summarize['done'] = 0
+        _summarize['total'] = 0
+        _summarize['errors'] = 0
+        _summarize['error_msg'] = None
+        _summarize['stop_requested'] = False
+        _summarize['started_at'] = datetime.now(timezone.utc).isoformat()
+        _summarize['last_update'] = _summarize['started_at']
+        _summarize['employee'] = employee
+
+        t = threading.Thread(target=_summarize_all_worker, args=(employee,), daemon=True)
+        _summarize['thread'] = t
+        t.start()
+
+    return jsonify({"status": "started", "employee": employee})
+
+
+@app.route("/api/session/summarize/status")
+def api_session_summarize_status():
+    """Poll summarize-all progress."""
+    with _summarize['lock']:
+        return jsonify({
+            "running": _summarize['running'],
+            "done": _summarize['done'],
+            "total": _summarize['total'],
+            "errors": _summarize['errors'],
+            "errorMsg": _summarize['error_msg'],
+            "lastUpdate": _summarize['last_update'],
+            "startedAt": _summarize['started_at'],
+            "employee": _summarize['employee'],
+        })
+
+
+@app.route("/api/session/summarize-all/stop", methods=["POST"])
+def api_session_summarize_stop():
+    """Request summarize-all to stop."""
+    with _summarize['lock']:
+        _summarize['stop_requested'] = True
+    return jsonify({"status": "stopping"})
+
+# ─── END_BLOCK_SESSION_SUMMARIZER
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────────
