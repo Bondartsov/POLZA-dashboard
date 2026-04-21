@@ -33,9 +33,9 @@ from sync_worker import SyncWorker, sync_all_keys
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 sync_worker = None
 AUTH_TOKEN = ""
-LLM_API_URL = "https://openrouter.ai/api/v1/chat/completions"  # overridden from .env
-LLM_MODEL = "anthropic/claude-haiku-4-5-20250414"  # overridden from .env
-LLM_API_KEY = ""  # separate key for LLM summarization; overridden from .env
+LLM_API_URL = "https://api.anthropic.com/v1/messages"  # overridden from .env
+LLM_MODEL = "claude-haiku-4-5-20250414"  # overridden from .env
+LLM_API_KEY = ""  # Anthropic API key; overridden from .env
 
 
 # ─── .env loader ─────────────────────────────────────────────────────────────────
@@ -992,15 +992,19 @@ def _summarize_single_session(session_id: str):
     # START_BLOCK_CALL_LLM
     llm_payload = {
         "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Промпты из сессии (показаны первые 500 символов каждого):\n\n{total_text}"},
-        ],
         "max_tokens": 500,
         "temperature": 0.3,
+        "system": SUMMARIZE_SYSTEM_PROMPT,
+        "messages": [
+            {"role": "user", "content": f"Промпты из сессии (показаны первые 500 символов каждого):\n\n{total_text}"},
+        ],
     }
 
-    _llm_headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
+    _llm_headers = {
+        "x-api-key": LLM_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
     r = http_requests.post(
         LLM_API_URL,
         headers=_llm_headers,
@@ -1023,11 +1027,14 @@ def _summarize_single_session(session_id: str):
     llm_cost = 0.0
     try:
         usage = llm_response.get("usage", {})
-        llm_cost = (usage.get("prompt_tokens", 0) * 0.0008 + usage.get("completion_tokens", 0) * 0.004) / 1000
+        llm_cost = (usage.get("input_tokens", 0) * 0.0008 + usage.get("output_tokens", 0) * 0.004) / 1000
     except:
         pass
 
-    content = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+    content = ""
+    for block in llm_response.get("content", []):
+        if block.get("type") == "text":
+            content += block.get("text", "")
     if not content:
         raise ValueError("LLM returned empty content")
 
@@ -1160,18 +1167,22 @@ def api_generation_summarize():
         if not total_text.strip():
             return jsonify({"topic": "Пустой запрос", "summary": "Нет текста для анализа", "isWork": True, "generationId": gen_id}), 200
 
-        # Call LLM
+        # Call LLM (Anthropic native API)
         llm_payload = {
             "model": LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": GEN_SUMMARIZE_PROMPT},
-                {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{total_text}"},
-            ],
             "max_tokens": 400,
             "temperature": 0.3,
+            "system": GEN_SUMMARIZE_PROMPT,
+            "messages": [
+                {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{total_text}"},
+            ],
         }
 
-        _llm_headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
+        _llm_headers = {
+            "x-api-key": LLM_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
         llm_r = http_requests.post(
             LLM_API_URL,
             headers=_llm_headers,
@@ -1184,7 +1195,10 @@ def api_generation_summarize():
             return jsonify({"topic": "Ошибка LLM", "summary": f"HTTP {llm_r.status_code}", "generationId": gen_id}), 200
 
         llm_response = llm_r.json()
-        llm_content = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        llm_content = ""
+        for block in llm_response.get("content", []):
+            if block.get("type") == "text":
+                llm_content += block.get("text", "")
 
         if not llm_content:
             return jsonify({"topic": "Пустой ответ LLM", "summary": "", "isWork": True, "generationId": gen_id}), 200
