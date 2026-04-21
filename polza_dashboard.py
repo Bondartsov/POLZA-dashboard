@@ -33,8 +33,9 @@ from sync_worker import SyncWorker, sync_all_keys
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 sync_worker = None
 AUTH_TOKEN = ""
-LLM_MODEL = "anthropic/claude-haiku-4-5-20250414"  # overridden from .env in main()
-LLM_API_KEY = ""  # If empty, uses POLZA_API_KEY via Polza.AI proxy; overridden from .env in main()
+LLM_API_URL = "https://openrouter.ai/api/v1/chat/completions"  # overridden from .env
+LLM_MODEL = "anthropic/claude-haiku-4-5-20250414"  # overridden from .env
+LLM_API_KEY = ""  # separate key for LLM summarization; overridden from .env
 
 
 # ─── .env loader ─────────────────────────────────────────────────────────────────
@@ -999,10 +1000,10 @@ def _summarize_single_session(session_id: str):
         "temperature": 0.3,
     }
 
-    _llm_key = LLM_API_KEY or AUTH_TOKEN
+    _llm_headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
     r = http_requests.post(
-        f"{POLZA_API}/chat/completions",
-        headers={**_headers(_llm_key), "Content-Type": "application/json"},
+        LLM_API_URL,
+        headers=_llm_headers,
         json=llm_payload,
         timeout=60,
     )
@@ -1170,10 +1171,10 @@ def api_generation_summarize():
             "temperature": 0.3,
         }
 
-        _llm_key = LLM_API_KEY or AUTH_TOKEN
+        _llm_headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
         llm_r = http_requests.post(
-            f"{POLZA_API}/chat/completions",
-            headers={**_headers(_llm_key), "Content-Type": "application/json"},
+            LLM_API_URL,
+            headers=_llm_headers,
             json=llm_payload,
             timeout=30,
         )
@@ -1344,7 +1345,7 @@ def api_session_summarize_stop():
 # ─── Main ─────────────────────────────────────────────────────────────────────────
 
 def main():
-    global AUTH_TOKEN, sync_worker, LLM_MODEL, LLM_API_KEY
+    global AUTH_TOKEN, sync_worker, LLM_API_URL, LLM_MODEL, LLM_API_KEY
 
     load_env()
     parser = argparse.ArgumentParser(description="Polza.AI Dashboard v3")
@@ -1354,10 +1355,11 @@ def main():
     args = parser.parse_args()
 
     AUTH_TOKEN = os.environ.get("POLZA_API_KEY", "")
+    LLM_API_URL = os.environ.get("LLM_API_URL", LLM_API_URL)
     LLM_MODEL = os.environ.get("LLM_MODEL", LLM_MODEL)
     LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 
-    print(f"🧠 LLM config: model={LLM_MODEL}, key={'set' if LLM_API_KEY or AUTH_TOKEN else 'MISSING'}")
+    print(f"🧠 LLM config: url={LLM_API_URL}, model={LLM_MODEL}, key={'✅' if LLM_API_KEY else '❌ NOT SET'}")
 
     # Init DB
     init_db()
