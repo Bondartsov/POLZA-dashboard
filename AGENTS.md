@@ -1,10 +1,10 @@
 # GRACE Framework - Project Engineering Protocol
 
 ## Keywords
-polza-ai, dashboard, monitoring, employee-tracking, api-analytics, session-summarization, cost-control, flask, postgresql, spa
+polza-ai, dashboard, monitoring, api-analytics, ai-summarization, anthropic-haiku, prompt-caching, cost-control, flask, postgresql, spa, topic-grouping
 
 ## Annotation
-Polza.AI Dashboard — веб-дашборд мониторинга и аналитики генераций AI-моделей. Отслеживает расходы команды из 12 сотрудников, группирует запросы по сессиям, суммаризирует задачи через LLM, выявляет аномалии и подозрения на нецелевое использование корпоративного API.
+Polza.AI Dashboard — веб-дашборд мониторинга генераций AI-моделей. Отслеживает расходы команды из 12 сотрудников, суммаризирует каждый промпт через Claude Haiku 4.5 (Anthropic native API) по явному клику в детальной модалке, кеширует LLM-результаты в PostgreSQL (100% экономия на повторах), группирует запросы по AI-темам и выявляет нецелевое использование через risk_flags (personal/sensitive/high_cost).
 
 ## Core Principles
 

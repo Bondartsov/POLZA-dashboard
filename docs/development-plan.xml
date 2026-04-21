@@ -1,11 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<DevelopmentPlan VERSION="0.2.0">
+<DevelopmentPlan VERSION="0.3.0">
+  <!-- CHANGELOG:
+         0.3.0 (2026-04-21): Added Phase-3 "AI per-generation analysis + UX refactor".
+                             Marked M-EMPLOYEE-UI as removed from active UI (tab dropped in
+                             simplify-ui refactor); M-EMPLOYEE-REPORT endpoints kept but unused.
+                             Added M-GEN-SUMMARY-STORE, M-LLM-ANTHROPIC, M-LLM-GEN-SUMMARIZE.
+                             Updated deploy target to /home/user/POLZA.
+         0.2.0: Employee Monitor phases 1-2.
+  -->
   <ArchitectureNotes>
-    <objective>Employee Monitor — система контроля расходов и суммаризации задач 12 сотрудников через LLM, поверх существующего Polza.AI Dashboard.</objective>
-    <non-goal>Не строить отдельное приложение — расширяем существующий Flask + SPA. Не заменять sync/backfill — дополняем.</non-goal>
-    <risk-1>Rate limit Polza.AI API при массовой загрузке логов для summarization — mitigated through batching and delay.</risk-1>
-    <risk-2>LLM может некорректно классифицировать рабочее/личное — нужен аккуратный промпт + human-in-the-loop через UI.</risk-2>
-    <risk-3>8 из 12 ключей не имеют session_id — для них только агрегация без AI-анализа.</risk-3>
+    <objective>Polza.AI Dashboard — мониторинг генераций + LLM-ассистированный анализ промптов сотрудников. После simplify-ui refactor фокус сместился с per-employee агрегации на per-generation AI-анализ в детальной модалке.</objective>
+    <non-goal>Не строить отдельное приложение — расширяем существующий Flask + SPA. Не заменять Polza.AI API как proxy для LLM — используем Anthropic напрямую отдельным ключом.</non-goal>
+    <risk-1>Rate limit Anthropic при bulk-analyze — mitigated via concurrency=3 + progressive UI.</risk-1>
+    <risk-2>LLM может некорректно классифицировать рабочее/личное — prompt явно требует is_work + risk_flags; human review через модалку.</risk-2>
+    <risk-3>Только 25% генераций имеют session_id (sparse Polza.AI metadata). Session-level features — graceful fallback: sub-блок в модалке только при наличии session_id.</risk-3>
+    <risk-4>Anthropic prompt-caching имеет минимум 2048 токенов для Haiku 4.5; текущие system-промпты короче — кеш молча не применяется. Экономия обеспечивается persistent DB-кешем вместо prompt-cache.</risk-4>
   </ArchitectureNotes>
 
   <Modules>
@@ -14,7 +23,7 @@
 
     <M-APP NAME="Flask App" TYPE="ENTRY_POINT" LAYER="0" ORDER="1" STATUS="done">
       <contract>
-        <purpose>Flask web-server v3: DB-backed API + proxy + background threads for sync/backfill</purpose>
+        <purpose>Flask web-server v3: DB-backed API + proxy + background threads + AI summarize endpoints</purpose>
         <inputs>HTTP requests from browser</inputs>
         <outputs>JSON API responses, static files</outputs>
       </contract>
@@ -23,7 +32,7 @@
         <fn-config PURPOSE="Auth config + keys + sync status" />
         <fn-health PURPOSE="DB health check" />
       </interface>
-      <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL</depends>
+      <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE</depends>
       <target>
         <source>polza_dashboard.py</source>
       </target>
@@ -32,11 +41,11 @@
 
     <M-DB NAME="Database Layer" TYPE="DATA_LAYER" LAYER="0" ORDER="1" STATUS="done">
       <contract>
-        <purpose>SQLAlchemy ORM: api_keys + generations tables in PostgreSQL</purpose>
+        <purpose>SQLAlchemy ORM: api_keys + generations + session_summaries + generation_summaries tables in PostgreSQL</purpose>
       </contract>
       <interface>
-        <fn-init_db PURPOSE="Create tables on startup" />
-        <fn-to_dict PURPOSE="Serialize Generation to JSON with _sessionId, _deviceId" />
+        <fn-init_db PURPOSE="Create all tables on startup via Base.metadata.create_all(engine)" />
+        <fn-to_dict PURPOSE="Serialize ORM objects to API-compatible JSON" />
       </interface>
       <target>
         <source>db.py</source>
@@ -68,7 +77,7 @@
 
     <M-STATIC NAME="Frontend Assets" TYPE="UI_COMPONENT" LAYER="0" ORDER="1" STATUS="done">
       <contract>
-        <purpose>SPA dashboard: table, charts, sidebar, sessions, backfill indicator</purpose>
+        <purpose>SPA dashboard after simplify-ui refactor: table with compact AI-cell, charts, sidebar, detail modal with embedded AI block, topic-grouping tab, backfill indicator</purpose>
       </contract>
       <target>
         <source>static/index.html, static/style.css, static/app.js</source>
@@ -85,21 +94,16 @@
       </target>
     </M-KEYS>
 
-    <!-- ═══ NEW MODULES (Employee Monitor) ═══ -->
+    <!-- ═══ EMPLOYEE MONITOR (done but deprecated in UI) ═══ -->
 
-    <M-SUMMARY-STORE NAME="Session Summary Store" TYPE="DATA_LAYER" LAYER="0" ORDER="1" STATUS="planned">
+    <M-SUMMARY-STORE NAME="Session Summary Store" TYPE="DATA_LAYER" LAYER="0" ORDER="1" STATUS="done">
       <contract>
         <purpose>SQLAlchemy model + CRUD for session_summaries table — caches LLM summaries per session</purpose>
-        <scope>CREATE TABLE, upsert, read by session_id, read by source_key, count without summary</scope>
-        <inputs>session_id, summary text, topic, is_work, risk_flags</inputs>
-        <outputs>SessionSummary ORM objects, JSON dicts</outputs>
       </contract>
       <interface>
-        <export-SessionSummary PURPOSE="ORM model: session_id, source_key, summary, topic, is_work, project_guess, risk_flags, llm_cost, created_at, updated_at" />
-        <fn-get_or_none PURPOSE="Get summary by session_id, return None if not cached" />
-        <fn-upsert PURPOSE="INSERT or UPDATE summary for a session_id" />
-        <fn-list_by_key PURPOSE="List summaries for an employee within date range" />
-        <fn-count_without_summary PURPOSE="Count sessions that don't have a summary yet" />
+        <fn-summary_get_or_none PURPOSE="Get summary by session_id, return None if not cached" />
+        <fn-summary_upsert PURPOSE="INSERT or UPDATE summary for a session_id" />
+        <fn-summary_list_by_key PURPOSE="List summaries for an employee within date range" />
       </interface>
       <depends>M-DB</depends>
       <target>
@@ -109,53 +113,17 @@
         <log-prefix>[SummaryStore]</log-prefix>
       </observability>
       <verification-ref>V-M-SUMMARY-STORE</verification-ref>
-      <notes>
-        <note-1>Added to db.py alongside existing ApiKey and Generation models. init_db() creates the table via create_all().</note-1>
-      </notes>
     </M-SUMMARY-STORE>
 
-    <M-EMPLOYEE-REPORT NAME="Employee Report API" TYPE="ENTRY_POINT" LAYER="1" ORDER="1" STATUS="planned">
+    <M-SESSION-SUMMARIZER NAME="Session Summarizer" TYPE="CORE_LOGIC" LAYER="2" ORDER="1" STATUS="done">
       <contract>
-        <purpose>Fast aggregated report per employee for a time period — pure SQL, no AI, instant response</purpose>
-        <scope>Single endpoint returning cost/tokens/sessions/anomalies for one or all employees</scope>
-        <inputs>employee name (optional), period (today/7d/30d/all), dateFrom/dateTo</inputs>
-        <outputs>JSON: total cost, tokens, request count, session list, anomaly flags, hourly heatmap, comparison vs previous period</outputs>
+        <purpose>LLM-powered session summarization via Anthropic native API (Claude Haiku 4.5) with prompt-caching enabled</purpose>
       </contract>
       <interface>
-        <fn-report PURPOSE="GET /api/employee-report — aggregated data for one or all employees" />
-        <fn-report_list PURPOSE="GET /api/employee-report/list — summary table: each employee with cost/tokens/requests for period" />
+        <fn-summarize_single_session PURPOSE="Summarize single session — returns from cache or calls LLM" />
+        <fn-api_session_summarize PURPOSE="POST /api/session/summarize — body: {sessionId}" />
       </interface>
-      <depends>M-DB, M-SUMMARY-STORE</depends>
-      <target>
-        <source>polza_dashboard.py</source>
-      </target>
-      <observability>
-        <log-prefix>[EmployeeReport]</log-prefix>
-      </observability>
-      <verification-ref>V-M-EMPLOYEE-REPORT</verification-ref>
-      <notes>
-        <note-1>All queries are pure SQLAlchemy aggregation — no external API calls, millisecond response.</note-1>
-      </notes>
-    </M-EMPLOYEE-REPORT>
-
-    <M-SESSION-SUMMARIZER NAME="Session Summarizer" TYPE="CORE_LOGIC" LAYER="2" ORDER="1" STATUS="planned">
-      <contract>
-        <purpose>LLM-powered summarization of a chat session — extracts task, topic, work/personal classification from user messages</purpose>
-        <scope>Load generation logs via detail API, extract user prompts, send to Polza.AI LLM (Haiku), parse structured response, cache in DB</scope>
-        <inputs>session_id (UUID)</inputs>
-        <outputs>summary text, topic, is_work boolean, project_guess, risk_flags, llm_cost</outputs>
-        <errors>
-          <error code="NO_GENERATIONS">Session has no generations in DB</error>
-          <error code="API_ERROR">Polza.AI detail or chat API returned error</error>
-          <error code="LLM_PARSE_ERROR">LLM response could not be parsed as structured data</error>
-        </errors>
-      </contract>
-      <interface>
-        <fn-summarize_session PURPOSE="Summarize single session — returns from cache or calls LLM</fn-summarize_session>
-        <fn-summarize_all PURPOSE="POST /api/session/summarize-all — background thread for all sessions of an employee</fn-summarize_all>
-        <fn-summarize_status PURPOSE="GET /api/session/summarize/status — polling endpoint for background progress</fn-summarize_status>
-      </interface>
-      <depends>M-DB, M-SUMMARY-STORE, M-APP</depends>
+      <depends>M-DB, M-SUMMARY-STORE, M-LLM-ANTHROPIC</depends>
       <target>
         <source>polza_dashboard.py</source>
       </target>
@@ -166,18 +134,11 @@
         <critical-block>BLOCK_PARSE_RESPONSE</critical-block>
       </observability>
       <verification-ref>V-M-SESSION-SUMMARIZER</verification-ref>
-      <notes>
-        <note-1>Uses Polza.AI API (Основной ключ) with Haiku model for cheap summarization (~$0.005/session).</note-1>
-        <note-2>Background thread pattern same as M-BACKFILL — start/stop/status + topbar indicator.</note-1>
-      </notes>
     </M-SESSION-SUMMARIZER>
 
-    <M-ANOMALY NAME="Anomaly Detector" TYPE="CORE_LOGIC" LAYER="1" ORDER="2" STATUS="planned">
+    <M-ANOMALY NAME="Anomaly Detector" TYPE="CORE_LOGIC" LAYER="1" ORDER="2" STATUS="code-remains-ui-removed">
       <contract>
-        <purpose>Detect suspicious usage patterns: off-hours, weekends, unusual models, burst activity, cost spikes</purpose>
-        <scope>Called by M-EMPLOYEE-REPORT to annotate employee data with anomaly flags</scope>
-        <inputs>Employee generation records for a period</inputs>
-        <outputs>List of anomaly objects: type, severity, details</outputs>
+        <purpose>Rule-based anomaly detection. Code remains but UI consumer removed in simplify-ui refactor.</purpose>
       </contract>
       <interface>
         <fn-detect PURPOSE="Analyze employee records, return anomaly list" />
@@ -191,109 +152,220 @@
       </observability>
       <verification-ref>V-M-ANOMALY</verification-ref>
       <notes>
-        <note-1>Pure computation — no external API. Rules-based, not ML.</note-1>
-        <note-2>Anomaly types: OFF_HOURS (22:00-08:00), WEEKEND, UNUSUAL_MODEL, BURST_50_PLUS, COST_SPIKE_200_PCT.</note-2>
+        <note-1>Anomaly concept partially migrated into AI risk_flags returned by M-LLM-GEN-SUMMARIZE (personal, sensitive, high_cost, unusual_model).</note-1>
       </notes>
     </M-ANOMALY>
 
-    <M-EMPLOYEE-UI NAME="Employee Monitor UI" TYPE="UI_COMPONENT" LAYER="1" ORDER="1" STATUS="planned">
+    <M-EMPLOYEE-REPORT NAME="Employee Report API" TYPE="ENTRY_POINT" LAYER="1" ORDER="1" STATUS="deprecated-endpoints-remain">
       <contract>
-        <purpose>Frontend: employee list with costs, drill-down report with sessions, summaries, anomalies, heatmap</purpose>
-        <scope>New tab "📊 По сотрудникам", employee report modal/page, summarize buttons</scope>
-        <inputs>API responses from M-EMPLOYEE-REPORT and M-SESSION-SUMMARIZER</inputs>
-        <outputs>DOM rendering, user interactions</outputs>
+        <purpose>SQL aggregation endpoints per employee. No UI consumer after refactor; kept for potential future re-use.</purpose>
       </contract>
       <interface>
-        <fn-load_employees PURPOSE="Load employee list with aggregated costs for period" />
-        <fn-render_employee_report PURPOSE="Render full report for selected employee" />
-        <fn-trigger_summarize PURPOSE="POST to start summarization, begin polling" />
-        <fn-render_heatmap PURPOSE="Render hourly activity heatmap SVG" />
+        <fn-report PURPOSE="GET /api/employee-report" />
+        <fn-report_list PURPOSE="GET /api/employee-report/list" />
       </interface>
-      <depends>M-STATIC</depends>
+      <depends>M-DB, M-SUMMARY-STORE</depends>
       <target>
-        <source>static/app.js, static/index.html, static/style.css</source>
+        <source>polza_dashboard.py</source>
       </target>
       <observability>
-        <log-prefix>[EmployeeUI]</log-prefix>
+        <log-prefix>[EmployeeReport]</log-prefix>
       </observability>
-      <verification-ref>V-M-EMPLOYEE-UI</verification-ref>
+      <verification-ref>V-M-EMPLOYEE-REPORT</verification-ref>
+    </M-EMPLOYEE-REPORT>
+
+    <M-EMPLOYEE-UI NAME="Employee Monitor UI" TYPE="UI_COMPONENT" LAYER="1" ORDER="1" STATUS="removed">
+      <contract>
+        <purpose>Removed in simplify-ui refactor (2026-04-21). Replaced by in-modal AI analysis and 'По темам AI' tab.</purpose>
+      </contract>
+      <target>
+        <source>(removed — no source files now consume this interface)</source>
+      </target>
       <notes>
-        <note-1>Added as new group-tab "📊 По сотрудникам" in existing tab bar.</note-1>
+        <note-1>Functionality intentionally cut because per-employee drill-down added complexity without replacing the primary investigation flow (which is: pick a suspicious row → see what the user did). The new flow satisfies UC-002 via detail modal + AI block.</note-1>
       </notes>
     </M-EMPLOYEE-UI>
+
+    <!-- ═══ PHASE-3 MODULES (done — AI per-generation + UX refactor) ═══ -->
+
+    <M-GEN-SUMMARY-STORE NAME="Generation Summary Store" TYPE="DATA_LAYER" LAYER="0" ORDER="2" STATUS="done">
+      <contract>
+        <purpose>Persistent per-generation LLM cache — 100% cost savings on repeated views and prefetch on table render</purpose>
+        <scope>CREATE TABLE generation_summaries, upsert, batch read by IDs, single read, delete</scope>
+        <inputs>generation_id, summary, topic, is_work, project_guess, risk_flags, usage metrics</inputs>
+        <outputs>GenerationSummary ORM objects, JSON dicts with full usage info</outputs>
+      </contract>
+      <interface>
+        <export-GenerationSummary PURPOSE="ORM model: generation_id PK + all summary + usage columns" />
+        <fn-gen_summary_get_or_none PURPOSE="Fetch single cached summary or None" />
+        <fn-gen_summary_get_many PURPOSE="Batch fetch — returns {id: to_dict()}" />
+        <fn-gen_summary_upsert PURPOSE="INSERT or UPDATE with full usage metrics" />
+        <fn-gen_summary_delete PURPOSE="Remove cache entry to force regeneration" />
+      </interface>
+      <depends>M-DB</depends>
+      <target>
+        <source>db.py</source>
+      </target>
+      <observability>
+        <log-prefix>[GenSummaryStore]</log-prefix>
+      </observability>
+      <verification-ref>V-M-GEN-SUMMARY-STORE</verification-ref>
+      <notes>
+        <note-1>Added alongside ApiKey, Generation, SessionSummary. init_db creates table via create_all.</note-1>
+        <note-2>Table stores cache_creation_tokens, cache_read_tokens, input_tokens, output_tokens, llm_cost for observability — lets the UI show full economics in the modal meta line.</note-2>
+      </notes>
+    </M-GEN-SUMMARY-STORE>
+
+    <M-LLM-ANTHROPIC NAME="Anthropic API Integration" TYPE="INTEGRATION" LAYER="1" ORDER="3" STATUS="done">
+      <contract>
+        <purpose>Direct Anthropic Messages API — NOT proxied. Own key/URL/model in .env. Supports prompt caching on system block.</purpose>
+        <scope>Build request payload, call API, parse response, compute cost, handle errors</scope>
+        <inputs>system_prompt, user_messages, cache_control flags</inputs>
+        <outputs>parsed LLM JSON, usage dict (input/output/cache_w/cache_r tokens, cost_usd)</outputs>
+        <errors>
+          <error code="HTTP_NON_200">Anthropic returned non-200 — body logged, raises ValueError</error>
+          <error code="EMPTY_CONTENT">Response has empty content[] — raises ValueError</error>
+          <error code="JSON_PARSE">LLM returned non-JSON despite strict prompt — caller catches JSONDecodeError</error>
+        </errors>
+      </contract>
+      <interface>
+        <fn-llm_call_summarize PURPOSE="Build payload with cache_control, call API, parse + compute cost. Helper shared by M-LLM-GEN-SUMMARIZE and M-SESSION-SUMMARIZER." />
+      </interface>
+      <depends>M-APP</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <observability>
+        <log-prefix>[GenSummarize][LLM]</log-prefix>
+      </observability>
+      <verification-ref>V-M-LLM-ANTHROPIC</verification-ref>
+      <notes>
+        <note-1>Format quirks learned: (1) system is TOP-LEVEL array, not a message; (2) response is content[].text not choices[0].message.content; (3) headers are x-api-key + anthropic-version, NOT Bearer; (4) 404 body often arrives with status 401-looking wrappers — always read response.text.</note-1>
+        <note-2>Pricing per 1M tokens (Haiku 4.5): input $1, output $5, cache_write $1.25, cache_read $0.10.</note-2>
+        <note-3>Prompt cache minimum for Haiku 4.5 is 2048 tokens; short prompts silently bypass caching.</note-3>
+      </notes>
+    </M-LLM-ANTHROPIC>
+
+    <M-LLM-GEN-SUMMARIZE NAME="Generation Summarizer" TYPE="CORE_LOGIC" LAYER="2" ORDER="2" STATUS="done">
+      <contract>
+        <purpose>Per-generation AI analysis: action + context + project + tech + risk flags. Manual trigger only. DB cache first.</purpose>
+        <scope>Endpoints for single summarize, batch prefetch, cache delete. Prompt engineering. Cost accounting.</scope>
+        <inputs>generation_id (optionally force=true)</inputs>
+        <outputs>JSON: {summary, topic, isWork, projectGuess, riskFlags, llmModel, llmCost, usage metrics, cached}</outputs>
+        <errors>
+          <error code="NO_USER_TEXT">Polza log has no extractable text — returns empty-placeholder result without calling LLM</error>
+          <error code="LLM_ERROR">LLM API failure — returns error JSON with details, non-500 to keep UI responsive</error>
+          <error code="CACHE_STORE_FAILED">DB write failed — non-fatal, response still returned</error>
+        </errors>
+      </contract>
+      <interface>
+        <fn-api_generation_summarize PURPOSE="POST /api/generation/summarize — main endpoint. Body: {generationId, force?}" />
+        <fn-api_generation_summaries_batch PURPOSE="POST /api/generation-summaries — body: {ids: [...]}. For prefetch" />
+        <fn-api_generation_summary_delete PURPOSE="DELETE /api/generation/summary — drop cache entry" />
+        <fn-extract_user_text_from_log PURPOSE="Helper: concatenate user-role messages (fallback any-role), cap 4000 chars" />
+      </interface>
+      <depends>M-DB, M-GEN-SUMMARY-STORE, M-LLM-ANTHROPIC</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <observability>
+        <log-prefix>[GenSummarize]</log-prefix>
+        <critical-block>START_BLOCK_GEN_CACHE_CHECK</critical-block>
+        <critical-block>START_BLOCK_GEN_CALL_LLM</critical-block>
+        <critical-block>START_BLOCK_GEN_CACHE_STORE</critical-block>
+      </observability>
+      <verification-ref>V-M-LLM-GEN-SUMMARIZE</verification-ref>
+      <notes>
+        <note-1>Strict JSON-output prompt asks for 3-5 sentence detailed summary with action, context, technologies, goal. Schema: summary, topic, is_work, project_guess, risk_flags[].</note-1>
+        <note-2>risk_flags values: personal, off_hours, unusual_model, high_cost, sensitive.</note-2>
+        <note-3>Cost ~$0.002 per first call. Repeat calls from DB cache are $0 and ~5-10ms response.</note-3>
+      </notes>
+    </M-LLM-GEN-SUMMARIZE>
 
   </Modules>
 
   <DataFlow>
 
-    <DF-001 NAME="Employee Report (instant)" TRIGGER="Admin selects employee + period">
-      <step-1>Frontend calls GET /api/employee-report?employee=X&amp;period=30d</step-1>
-      <step-2>Backend queries PostgreSQL: SUM(cost), COUNT(*), GROUP BY session_id for employee</step-1>
-      <step-3>M-ANOMALY scans records for off-hours, weekends, burst, cost spike</step-3>
-      <step-4>Backend joins with session_summaries (if any) for enriched data</step-4>
-      <step-5>JSON response: {employee, period, totals, sessions[], anomalies[], heatmap[]}</step-5>
-      <evidence>[EmployeeReport][report] returns JSON with totals + sessions + anomalies</evidence>
+    <DF-001 NAME="Employee Report (instant)" TRIGGER="(deprecated — no UI trigger after simplify-ui)">
+      <step-1>Endpoint callable via curl for external integrations only</step-1>
+      <evidence>[EmployeeReport][report] returns JSON</evidence>
     </DF-001>
 
-    <DF-002 NAME="Session Summarize (on-demand)" TRIGGER="Admin clicks Summarize on a session card">
-      <step-1>Frontend calls POST /api/session/summarize?sessionId=UUID</step-1>
+    <DF-002 NAME="Session Summarize (on-demand, from detail modal)" TRIGGER="User clicks '🧠 Анализ сессии целиком' sub-button in detail modal">
+      <step-1>Frontend runSessionAnalysis() calls POST /api/session/summarize {sessionId}</step-1>
       <step-2>M-SUMMARY-STORE checks cache — if hit, return immediately</step-2>
-      <step-3>Cache miss: load all generation IDs for this session from generations table</step-3>
-      <step-4>BLOCK_FETCH_LOGS: For each generation, call GET /v1/history/generations/{id}/log via Polza.AI API</step-4>
-      <step-5>Extract user messages from response logs, concatenate (first 500 chars each, max 20 messages)</step-5>
-      <step-6>BLOCK_CALL_LLM: POST /v1/chat/completions to Polza.AI with Haiku — structured prompt requesting summary/topic/is_work</step-6>
-      <step-7>BLOCK_PARSE_RESPONSE: Parse LLM JSON response into structured fields</step-7>
-      <step-8>M-SUMMARY-STORE.upsert(session_id, summary, topic, is_work, ...)</step-8>
-      <step-9>Return JSON: {sessionId, summary, topic, isWork, projectGuess, riskFlags, llmCost}</step-9>
-      <evidence>[Summarizer][summarize_session][BLOCK_CALL_LLM] LLM response received + [BLOCK_PARSE_RESPONSE] parsed OK</evidence>
+      <step-3>Cache miss: load session generations from DB</step-3>
+      <step-4>BLOCK_FETCH_LOGS: for each generation, call Polza.AI /history/generations/{id}/log</step-4>
+      <step-5>BLOCK_CALL_LLM: Anthropic native call with cache_control system block</step-5>
+      <step-6>BLOCK_PARSE_RESPONSE: parse LLM JSON</step-6>
+      <step-7>summary_upsert — cache in session_summaries</step-7>
+      <step-8>Return JSON; frontend re-renders session sub-block with topic + summary</step-8>
+      <evidence>[Summarizer][BLOCK_CALL_LLM] + [SummaryStore][upsert] cached session_id=...</evidence>
     </DF-002>
 
-    <DF-003 NAME="Summarize All (background)" TRIGGER="Admin clicks Summarize All for employee">
-      <step-1>Frontend calls POST /api/session/summarize-all?employee=X</step-1>
-      <step-2>Backend starts background thread (like M-BACKFILL pattern)</step-2>
-      <step-3>Thread iterates sessions without summary, calls DF-002 for each</step-3>
-      <step-4>Progress tracked in global _summarize dict: {running, done, total, errors}</step-4>
-      <step-5>Frontend polls GET /api/session/summarize/status every 2s — topbar indicator</step-5>
-      <step-6>When done, frontend refreshes employee report view</step-6>
-      <evidence>[Summarizer][summarize_all_worker] progress logged + topbar indicator visible</evidence>
-    </DF-003>
-
-    <DF-004 NAME="Anomaly Detection (computed)" TRIGGER="Part of DF-001 — no separate trigger">
-      <step-1>M-EMPLOYEE-REPORT passes employee generations to M-ANOMALY.detect()</step-1>
-      <step-2>Rule 1: OFF_HOURS — any generation with createdAt hour in 22:00-08:00 local time</step-2>
-      <step-3>Rule 2: WEEKEND — any generation on Saturday/Sunday</step-3>
-      <step-4>Rule 3: UNUSUAL_MODEL — model not in employee's top 3 models</step-4>
-      <step-5>Rule 4: BURST — more than 50 generations in any 1-hour window</step-5>
-      <step-6>Rule 5: COST_SPIKE — current period cost > 3x average of last 3 same-length periods</step-6>
-      <step-7>Returns list of {type, severity, details} objects</step-7>
-      <evidence>[Anomaly][detect] returns anomaly list with types and details</evidence>
+    <DF-004 NAME="Anomaly Detection (code-only)" TRIGGER="(not triggered in current UI)">
+      <step-1>Remains callable through M-EMPLOYEE-REPORT endpoints</step-1>
+      <evidence>[Anomaly][detect] returns list</evidence>
     </DF-004>
+
+    <DF-005 NAME="Per-generation AI analysis (on-demand, inside detail modal)" TRIGGER="User opens detail modal and clicks '🧠 Проанализировать'">
+      <step-1>Frontend openDetail(genId) renders modal — AI block shows empty state with cost disclosure "$0.002"</step-1>
+      <step-2>User clicks button → runGenAnalysis(genId) posts to /api/generation/summarize {generationId}</step-2>
+      <step-3>BLOCK_GEN_CACHE_CHECK: gen_summary_get_or_none — if hit, return cached dict with cached:true</step-3>
+      <step-4>Cache miss: _resolve_token_for_gen, fetch Polza log, _extract_user_text_from_log</step-4>
+      <step-5>BLOCK_GEN_CALL_LLM: _llm_call_summarize — Anthropic native call with cache_control</step-5>
+      <step-6>Parse JSON from content[].text</step-6>
+      <step-7>BLOCK_GEN_CACHE_STORE: gen_summary_upsert with full usage metrics</step-7>
+      <step-8>Return JSON including cacheCreationTokens / cacheReadTokens / inputTokens / outputTokens / llmCost</step-8>
+      <step-9>Frontend re-renders AI block with topic, summary, flags, session sub-block, meta line</step-9>
+      <step-10>Table cell is updated via renderTable() — chip with topic replaces grey 🧠</step-10>
+      <evidence>[GenSummarize][LLM] ok input=N output=N cost=$0.00XXXX + [GenSummaryStore][upsert] cached generation_id=...</evidence>
+    </DF-005>
+
+    <DF-006 NAME="Summary prefetch on table load" TRIGGER="loadPage() completes after /api/db/all">
+      <step-1>prefetchSummaries() collects visible generation IDs</step-1>
+      <step-2>POST /api/generation-summaries {ids: [...]} — batch fetch from DB (cap 500)</step-2>
+      <step-3>gen_summary_get_many returns dict {id: to_dict()}</step-3>
+      <step-4>Frontend populates S.summary_{id} and calls renderTable()</step-4>
+      <step-5>AI cells now show chip+topic where cache exists, grey 🧠 elsewhere</step-5>
+      <step-6>Zero LLM calls, only DB read — fast and free</step-6>
+      <evidence>POST /api/generation-summaries HTTP/1.1 200 in access log</evidence>
+    </DF-006>
+
+    <DF-007 NAME="Bulk analyze group" TRIGGER="User clicks '🧠 Проанализировать (N)' in '🤖 Без AI-анализа' topic group">
+      <step-1>bulkAnalyze(btnEl, ids) parses pipe-separated ID list</step-1>
+      <step-2>Launches 3 concurrent workers (Promise.all)</step-2>
+      <step-3>Each worker pulls next ID, calls POST /api/generation/summarize, updates S[`summary_${id}`]</step-3>
+      <step-4>Progress shown in button text: ⏳ done/total, updated after each completion</step-4>
+      <step-5>Final state: ✅ Готово (N/N); renderTable() to refresh all affected rows</step-5>
+      <evidence>N × [GenSummarize] ok + /api/generation/summarize HTTP/1.1 200 repeated in access log</evidence>
+    </DF-007>
 
   </DataFlow>
 
   <ImplementationOrder>
 
-    <Phase-1 name="Employee Report (no AI)" status="pending">
+    <Phase-1 name="Employee Report (no AI)" status="done">
       <goal>Fast aggregated employee view — instant value, zero AI cost, pure SQL</goal>
-      <step-1 module="M-SUMMARY-STORE" status="pending" verification="V-M-SUMMARY-STORE">Add SessionSummary model to db.py + CREATE TABLE via migration script</step-1>
-      <step-2 module="M-ANOMALY" status="pending" verification="V-M-ANOMALY">Implement anomaly detection rules in polza_dashboard.py</step-2>
-      <step-3 module="M-EMPLOYEE-REPORT" status="pending" verification="V-M-EMPLOYEE-REPORT">Add /api/employee-report and /api/employee-report/list endpoints</step-3>
-      <step-4 module="M-EMPLOYEE-UI" status="pending" verification="V-M-EMPLOYEE-UI">Add "📊 По сотрудникам" tab, employee list, drill-down report, heatmap</step-4>
-      <step-5 module="M-STATIC" status="pending" verification="V-M-STATIC">CSS for employee cards, anomaly badges, heatmap</step-5>
+      <step-1 module="M-SUMMARY-STORE" status="done" verification="V-M-SUMMARY-STORE">SessionSummary model + CRUD</step-1>
+      <step-2 module="M-ANOMALY" status="done" verification="V-M-ANOMALY">Rule-based anomaly detection</step-2>
+      <step-3 module="M-EMPLOYEE-REPORT" status="done" verification="V-M-EMPLOYEE-REPORT">Endpoints /api/employee-report + /api/employee-report/list</step-3>
+      <step-4 module="M-EMPLOYEE-UI" status="removed" verification="V-M-EMPLOYEE-UI">UI tab added then removed in simplify-ui refactor</step-4>
     </Phase-1>
 
-    <Phase-2 name="Session Summarizer (LLM)" status="pending">
-      <goal>AI-powered session analysis — task, topic, work/personal classification</goal>
-      <step-1 module="M-SESSION-SUMMARIZER" status="pending" verification="V-M-SESSION-SUMMARIZER">Implement single-session summarize with LLM call + caching</step-1>
-      <step-2 module="M-SESSION-SUMMARIZER" status="pending" verification="V-M-SESSION-SUMMARIZER">Add background summarize-all thread with status polling</step-2>
-      <step-3 module="M-EMPLOYEE-UI" status="pending" verification="V-M-EMPLOYEE-UI">Add Summarize/Summarize All buttons, topbar indicator, cached summary display</step-3>
+    <Phase-2 name="Session Summarizer (LLM)" status="done">
+      <goal>AI-powered session analysis via Polza.AI → then migrated to Anthropic native</goal>
+      <step-1 module="M-SESSION-SUMMARIZER" status="done" verification="V-M-SESSION-SUMMARIZER">Single-session summarize with caching</step-1>
+      <step-2 module="M-SESSION-SUMMARIZER" status="code-only" verification="V-M-SESSION-SUMMARIZER">Background summarize-all thread — endpoints remain, UI removed</step-2>
     </Phase-2>
 
-    <Phase-3 name="Polish & Deploy" status="pending">
-      <goal>Final integration, edge cases, full deploy</goal>
-      <step-1 module="M-EMPLOYEE-REPORT" status="pending">Add employee summary aggregation (all summaries into one report)</step-1>
-      <step-2 module="M-STATIC" status="pending">Final UI polish, mobile responsive, error states</step-2>
-      <step-3 module="M-APP" status="pending">Full deploy to VM, verify with real data</step-3>
+    <Phase-3 name="AI per-generation + UX refactor" status="done">
+      <goal>Manual-trigger per-generation AI analysis inside detail modal, topic-based grouping, bulk analyze</goal>
+      <step-1 module="M-GEN-SUMMARY-STORE" status="done" verification="V-M-GEN-SUMMARY-STORE">GenerationSummary model + full CRUD including batch fetch</step-1>
+      <step-2 module="M-LLM-ANTHROPIC" status="done" verification="V-M-LLM-ANTHROPIC">Direct Anthropic Messages API integration with cache_control, cost accounting, error mapping</step-2>
+      <step-3 module="M-LLM-GEN-SUMMARIZE" status="done" verification="V-M-LLM-GEN-SUMMARIZE">Endpoints: POST summarize, POST batch, DELETE cache. Extended prompt for 3-5 sentence output.</step-3>
+      <step-4 module="M-STATIC" status="done" verification="V-M-STATIC">UI refactor: AI section inside detail modal, compact ai-cell, topic tab, bulk analyze, session sub-block</step-4>
+      <step-5 module="M-APP" status="done">Deploy to VM: /home/user/POLZA (consolidated from POLZA.AI + POLZA-new), branch main</step-5>
     </Phase-3>
 
   </ImplementationOrder>

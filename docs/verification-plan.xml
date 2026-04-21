@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<VerificationPlan VERSION="0.2.0">
+<VerificationPlan VERSION="0.3.0">
+  <!-- CHANGELOG:
+         0.3.0 (2026-04-21): Added V-M-GEN-SUMMARY-STORE, V-M-LLM-ANTHROPIC, V-M-LLM-GEN-SUMMARIZE.
+                             Added VF-005 (per-generation analyze), VF-006 (prefetch on load),
+                             VF-007 (bulk analyze). Updated Gate-Phase-3. Marked employee-related
+                             checks as deprecated.
+         0.2.0: Module-level checks for Employee Monitor phase.
+  -->
   <GlobalPolicy>
     <log-format>[ModuleName][functionName][BLOCK_NAME] message</log-format>
     <deterministic-first>true</deterministic-first>
@@ -11,18 +18,14 @@
 
   <CriticalFlows>
 
-    <VF-001 NAME="Employee Report Instant" USE_CASES="UC-001" DATA_FLOW="DF-001" PRIORITY="high">
-      <scenario>Admin opens employee report for Радько Кирилл, period 30d</scenario>
-      <expected-outcome>JSON with totals, session list, anomaly flags, hourly heatmap — response &lt; 500ms</expected-outcome>
-      <required-signals>
-        <log-marker>[EmployeeReport][report] returned JSON</log-marker>
-        <trace-sequence>QUERY_GENERATIONS -> DETECT_ANOMALIES -> RETURN_JSON</trace-sequence>
-      </required-signals>
+    <VF-001 NAME="Employee Report Instant" USE_CASES="UC-001" DATA_FLOW="DF-001" PRIORITY="deprecated">
+      <scenario>(deprecated) Endpoint still callable via curl but no UI consumer</scenario>
+      <expected-outcome>JSON response still well-formed if called externally</expected-outcome>
     </VF-001>
 
     <VF-002 NAME="Session Summarize On-Demand" USE_CASES="UC-002" DATA_FLOW="DF-002" PRIORITY="high">
-      <scenario>Admin clicks Summarize on a session with 18 generations</scenario>
-      <expected-outcome>Summary text, topic, is_work classification — cached in DB — second click instant from cache</expected-outcome>
+      <scenario>User opens detail modal for a generation with session_id, clicks '🧠 Анализ сессии целиком'</scenario>
+      <expected-outcome>Summary text, topic, is_work classification — cached in session_summaries — second click instant</expected-outcome>
       <required-signals>
         <log-marker>[Summarizer][summarize_session][BLOCK_CALL_LLM] LLM response received</log-marker>
         <log-marker>[Summarizer][summarize_session][BLOCK_PARSE_RESPONSE] parsed OK</log-marker>
@@ -30,23 +33,49 @@
       </required-signals>
     </VF-002>
 
-    <VF-003 NAME="Summarize All Background" USE_CASES="UC-004" DATA_FLOW="DF-003" PRIORITY="medium">
-      <scenario>Admin clicks Summarize All for employee with 5 sessions without summary</scenario>
-      <expected-outcome>Background thread processes all 5, topbar shows progress, survives page refresh</expected-outcome>
-      <required-signals>
-        <log-marker>[Summarizer][summarize_all_worker] started</log-marker>
-        <log-marker>[Summarizer][summarize_all_worker] session X done</log-marker>
-        <log-marker>[Summarizer][summarize_all_worker] completed</log-marker>
-      </required-signals>
-    </VF-003>
-
-    <VF-004 NAME="Anomaly Detection" USE_CASES="UC-005" DATA_FLOW="DF-004" PRIORITY="medium">
-      <scenario>Employee has generation at 23:15 on a Saturday with image-gen model</scenario>
-      <expected-outcome>Two anomalies flagged: OFF_HOURS + WEEKEND, one UNUSUAL_MODEL</expected-outcome>
-      <required-signals>
-        <log-marker>[Anomaly][detect] found N anomalies for employee X</log-marker>
-      </required-signals>
+    <VF-004 NAME="Anomaly Detection" USE_CASES="UC-005" DATA_FLOW="DF-004" PRIORITY="deprecated">
+      <scenario>(deprecated) Rule detection code present but no UI consumer</scenario>
+      <expected-outcome>M-ANOMALY.detect() still returns anomaly list when called from code</expected-outcome>
     </VF-004>
+
+    <VF-005 NAME="Per-generation AI analyze" USE_CASES="UC-002" DATA_FLOW="DF-005" PRIORITY="high">
+      <scenario>User clicks row → detail modal opens → AI block shows empty state → clicks '🧠 Проанализировать' → after ~2-3s block fills with topic/summary/project/meta</scenario>
+      <expected-outcome>
+        First call: LLM invoked, result saved, cached=false in response.
+        Second call without force: cached=true, instant (&lt;100ms), no LLM log marker.
+        Force=true: re-invokes LLM, updates DB row.
+      </expected-outcome>
+      <required-signals>
+        <log-marker>[GenSummarize][LLM] ok input=N output=N cost=$0.00XXXX</log-marker>
+        <log-marker>[GenSummaryStore][upsert] cached generation_id=...</log-marker>
+        <log-marker>[GenSummarize][cache_hit] generation_id=... (on repeat calls)</log-marker>
+      </required-signals>
+    </VF-005>
+
+    <VF-006 NAME="Summary prefetch on page load" USE_CASES="UC-002" DATA_FLOW="DF-006" PRIORITY="medium">
+      <scenario>User opens dashboard, table renders, previously-analyzed rows show topic chip immediately without clicks</scenario>
+      <expected-outcome>
+        Single POST /api/generation-summaries with 50+ ids → returns {summaries: {id: ...}} for cached ones.
+        AI cells reflect cache without any LLM call.
+      </expected-outcome>
+      <required-signals>
+        <log-marker>POST /api/generation-summaries HTTP/1.1 200</log-marker>
+        <no-log-marker>[GenSummarize][LLM] ok (must NOT appear on bare page load)</no-log-marker>
+      </required-signals>
+    </VF-006>
+
+    <VF-007 NAME="Bulk analyze group" USE_CASES="UC-002" DATA_FLOW="DF-007" PRIORITY="medium">
+      <scenario>User switches to '🧠 По темам AI' tab, clicks '🧠 Проанализировать (N)' in '🤖 Без AI-анализа' group with 10 rows</scenario>
+      <expected-outcome>
+        10 POSTs to /api/generation/summarize via 3-worker pool.
+        Button text progresses ⏳ 1/10 → ⏳ 10/10 → ✅ Готово (10/10).
+        After completion, all 10 rows show analyzed chip; reloading page persists state (DB cache).
+      </expected-outcome>
+      <required-signals>
+        <log-marker>Multiple [GenSummarize][LLM] ok entries</log-marker>
+        <log-marker>Multiple [GenSummaryStore][upsert] cached generation_id=...</log-marker>
+      </required-signals>
+    </VF-007>
 
   </CriticalFlows>
 
@@ -58,7 +87,7 @@
       </test-files>
       <module-checks>
         <check-1>python -c "from db import SessionSummary; print('OK')"</check-1>
-        <check-2>curl -s http://localhost:5000/api/employee-report/list | python3 -m json.tool</check-2>
+        <check-2>PGPASSWORD=bond psql -h localhost -U dbadmin -d polza_dashboard -c "\d session_summaries" | head -20</check-2>
       </module-checks>
       <scenarios>
         <scenario-1 kind="success">CREATE TABLE session_summaries succeeds on startup</scenario-1>
@@ -70,38 +99,82 @@
       </required-log-markers>
     </V-M-SUMMARY-STORE>
 
-    <V-M-EMPLOYEE-REPORT MODULE="M-EMPLOYEE-REPORT" PRIORITY="high">
+    <V-M-GEN-SUMMARY-STORE MODULE="M-GEN-SUMMARY-STORE" PRIORITY="high">
       <test-files>
-        <file>tests/test_employee_report.py</file>
+        <file>tests/test_gen_summary_store.py</file>
       </test-files>
       <module-checks>
-        <check-1>curl -s "http://localhost:5000/api/employee-report?employee=Радько+Кирилл&amp;period=30d" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['totals']['cost']&gt;0"</check-1>
-        <check-2>curl -s http://localhost:5000/api/employee-report/list | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d['employees'])==12"</check-2>
+        <check-1>python -c "from db import GenerationSummary, gen_summary_get_or_none, gen_summary_get_many, gen_summary_upsert, gen_summary_delete; print('imports OK')"</check-1>
+        <check-2>PGPASSWORD=bond psql -h localhost -U dbadmin -d polza_dashboard -c "\d generation_summaries"</check-2>
+        <check-3>curl -s -X POST http://localhost:5000/api/generation-summaries -H "Content-Type: application/json" -d '{"ids":["gen_000000"]}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'summaries' in d"</check-3>
       </module-checks>
       <scenarios>
-        <scenario-1 kind="success">Employee report returns correct cost sum for known employee</scenario-1>
-        <scenario-2 kind="success">Employee list returns all 12 keys with non-zero totals</scenario-2>
-        <scenario-3 kind="failure">Unknown employee returns empty sessions, zero totals</scenario-3>
+        <scenario-1 kind="success">Table created on startup via Base.metadata.create_all</scenario-1>
+        <scenario-2 kind="success">Upsert of new generation_id INSERTs; second upsert UPDATEs same row</scenario-2>
+        <scenario-3 kind="success">get_many returns {} for unknown ids, populated dict for cached ones</scenario-3>
+        <scenario-4 kind="success">delete removes row, next summarize call triggers fresh LLM</scenario-4>
       </scenarios>
       <required-log-markers>
-        <marker-1>[EmployeeReport][report]</marker-1>
-        <marker-1>[EmployeeReport][report_list]</marker-1>
+        <marker-1>[GenSummaryStore][upsert]</marker-1>
       </required-log-markers>
-    </V-M-EMPLOYEE-REPORT>
+    </V-M-GEN-SUMMARY-STORE>
+
+    <V-M-LLM-ANTHROPIC MODULE="M-LLM-ANTHROPIC" PRIORITY="high">
+      <test-files>
+        <file>tests/test_llm_anthropic.py</file>
+      </test-files>
+      <module-checks>
+        <check-1>python -c "from polza_dashboard import LLM_API_URL, LLM_MODEL, LLM_API_KEY; assert LLM_API_URL.startswith('https://'); assert LLM_MODEL; assert len(LLM_API_KEY) > 20"</check-1>
+        <check-2>curl -s -X POST "$LLM_API_URL" -H "x-api-key: $LLM_API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" -d '{"model":"claude-haiku-4-5","max_tokens":20,"messages":[{"role":"user","content":"ping"}]}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('type') == 'message' or d.get('role') == 'assistant' or 'content' in d"</check-2>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">.env provides LLM_API_URL, LLM_MODEL, LLM_API_KEY; all loaded at startup</scenario-1>
+        <scenario-2 kind="success">Direct curl to Anthropic with alias 'claude-haiku-4-5' returns 200 + content[].text</scenario-2>
+        <scenario-3 kind="failure">Wrong model id (e.g. claude-haiku-4-5-20250414) → 404 with not_found_error body, NOT 401</scenario-3>
+        <scenario-4 kind="success">cache_control on system block accepted silently even when prompt &lt; 2048 tokens (cache_creation_input_tokens=0 in usage)</scenario-4>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>🧠 LLM config: url=... model=... key=✅ (on startup)</marker-1>
+      </required-log-markers>
+    </V-M-LLM-ANTHROPIC>
+
+    <V-M-LLM-GEN-SUMMARIZE MODULE="M-LLM-GEN-SUMMARIZE" PRIORITY="high">
+      <test-files>
+        <file>tests/test_llm_gen_summarize.py</file>
+      </test-files>
+      <module-checks>
+        <check-1>curl -s -X POST http://localhost:5000/api/generation/summarize -H "Content-Type: application/json" -d '{"generationId":"KNOWN_GEN_ID"}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'summary' in d; assert 'topic' in d; assert 'isWork' in d; assert 'llmCost' in d"</check-1>
+        <check-2>curl -s -X POST http://localhost:5000/api/generation/summarize -H "Content-Type: application/json" -d '{"generationId":"KNOWN_GEN_ID"}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['cached']==True"</check-2>
+        <check-3>curl -s -X POST http://localhost:5000/api/generation-summaries -H "Content-Type: application/json" -d '{"ids":["KNOWN_GEN_ID","UNKNOWN_ID"]}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'KNOWN_GEN_ID' in d['summaries']"</check-3>
+        <check-4>curl -s -X DELETE "http://localhost:5000/api/generation/summary?generationId=KNOWN_GEN_ID" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('ok')==True"</check-4>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">First summarize call: LLM invoked, DB row created, cached=false in response</scenario-1>
+        <scenario-2 kind="success">Second call without force: cached=true, response &lt;100ms, no LLM log marker</scenario-2>
+        <scenario-3 kind="success">force=true: LLM re-invoked, DB row updated, cached=false again</scenario-3>
+        <scenario-4 kind="success">Batch endpoint with 50 ids returns only those that are in DB cache</scenario-4>
+        <scenario-5 kind="failure">Unknown generation_id: Polza log fetch returns 404 → response includes placeholder summary, not 500</scenario-5>
+        <scenario-6 kind="failure">Anthropic 429 (rate limit): error returned in JSON with details, UI-visible, not crash</scenario-6>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>[GenSummarize][LLM] ok input=N output=N cost=$...</marker-1>
+        <marker-2>[GenSummaryStore][upsert] cached generation_id=...</marker-2>
+        <marker-3>[GenSummarize][cache_hit] generation_id=... (on repeat)</marker-3>
+      </required-log-markers>
+    </V-M-LLM-GEN-SUMMARIZE>
 
     <V-M-SESSION-SUMMARIZER MODULE="M-SESSION-SUMMARIZER" PRIORITY="high">
       <test-files>
         <file>tests/test_summarizer.py</file>
       </test-files>
       <module-checks>
-        <check-1>curl -s -X POST "http://localhost:5000/api/session/summarize?sessionId=168c4203-32ad-4a0d-97ed-ac7a7ac3a62b" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'summary' in d"</check-1>
-        <check-2>curl -s http://localhost:5000/api/session/summarize/status | python3 -m json.tool</check-2>
+        <check-1>curl -s -X POST http://localhost:5000/api/session/summarize -H "Content-Type: application/json" -d '{"sessionId":"168c4203-32ad-4a0d-97ed-ac7a7ac3a62b"}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'summary' in d"</check-1>
       </module-checks>
       <scenarios>
-        <scenario-1 kind="success">First summarize calls LLM and caches result</scenario-1>
+        <scenario-1 kind="success">First summarize calls LLM and caches result in session_summaries</scenario-1>
         <scenario-2 kind="success">Second summarize returns from cache instantly</scenario-2>
-        <scenario-3 kind="failure">Invalid session_id returns error, not crash</scenario-3>
-        <scenario-4 kind="failure">LLM API error returns structured error with retry suggestion</scenario-4>
+        <scenario-3 kind="failure">Invalid session_id returns NO_GENERATIONS error JSON, not crash</scenario-3>
+        <scenario-4 kind="failure">All generations missing log data returns NO_USER_MESSAGES error</scenario-4>
       </scenarios>
       <required-log-markers>
         <marker-1>[Summarizer][summarize_session][BLOCK_FETCH_LOGS]</marker-1>
@@ -110,58 +183,88 @@
       </required-log-markers>
     </V-M-SESSION-SUMMARIZER>
 
-    <V-M-ANOMALY MODULE="M-ANOMALY" PRIORITY="medium">
+    <V-M-ANOMALY MODULE="M-ANOMALY" PRIORITY="deprecated">
       <module-checks>
-        <check-1>curl -s "http://localhost:5000/api/employee-report?employee=Радько+Кирилл&amp;period=30d" | python3 -c "import sys,json; d=json.load(sys.stdin); assert isinstance(d.get('anomalies'),list)"</check-1>
+        <check-1>python -c "from polza_dashboard import _detect_anomalies; print('callable')"</check-1>
       </module-checks>
       <scenarios>
-        <scenario-1 kind="success">Generations at 23:00 trigger OFF_HOURS anomaly</scenario-1>
-        <scenario-2 kind="success">Weekend generations trigger WEEKEND anomaly</scenario-2>
-        <scenario-3 kind="success">100 generations in 1 hour trigger BURST anomaly</scenario-3>
+        <scenario-1 kind="success">Function still importable and returns list when called</scenario-1>
       </scenarios>
     </V-M-ANOMALY>
 
-    <V-M-EMPLOYEE-UI MODULE="M-EMPLOYEE-UI" PRIORITY="medium">
+    <V-M-EMPLOYEE-REPORT MODULE="M-EMPLOYEE-REPORT" PRIORITY="deprecated">
       <module-checks>
-        <check-1>Open http://10.61.11.54:5000 in browser, click "📊 По сотрудникам" tab — employee list appears</check-1>
-        <check-2>Click on employee name — report loads with sessions, anomalies, heatmap</check-2>
+        <check-1>curl -s http://localhost:5000/api/employee-report/list | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'employees' in d"</check-1>
       </module-checks>
       <scenarios>
-        <scenario-1 kind="success">Employee list shows all 12 employees with costs</scenario-1>
-        <scenario-2 kind="success">Drill-down shows sessions with Summarize buttons</scenario-2>
+        <scenario-1 kind="success">Endpoint still responds with employees array when called externally</scenario-1>
       </scenarios>
+    </V-M-EMPLOYEE-REPORT>
+
+    <V-M-EMPLOYEE-UI MODULE="M-EMPLOYEE-UI" PRIORITY="removed">
+      <notes>UI tab removed. No verification needed.</notes>
     </V-M-EMPLOYEE-UI>
+
+    <V-M-STATIC MODULE="M-STATIC" PRIORITY="high">
+      <module-checks>
+        <check-1>curl -s http://localhost:5000/ | grep -q 'По темам AI' &amp;&amp; echo 'topic tab present'</check-1>
+        <check-2>curl -s http://localhost:5000/app.js | grep -q 'renderAiSection' &amp;&amp; echo 'AI section renderer present'</check-2>
+        <check-3>curl -s http://localhost:5000/app.js | grep -q 'bulkAnalyze' &amp;&amp; echo 'bulk analyze present'</check-3>
+        <check-4>curl -s http://localhost:5000/app.js | grep -q 'prefetchSummaries' &amp;&amp; echo 'prefetch present'</check-4>
+        <check-5>curl -s http://localhost:5000/style.css | grep -q 'ai-cell-done' &amp;&amp; echo 'new css present'</check-5>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Detail modal embeds AI block on top when row clicked</scenario-1>
+        <scenario-2 kind="success">Topic grouping tab groups rows by AI topic; unanalyzed fall into "Без AI-анализа"</scenario-2>
+        <scenario-3 kind="success">Bulk analyze button triggers parallel LLM calls, progressively updates N/total in button text</scenario-3>
+        <scenario-4 kind="success">Session sub-block appears only when generation has session_id</scenario-4>
+      </scenarios>
+    </V-M-STATIC>
 
   </ModuleVerification>
 
   <PhaseGates>
 
-    <Gate-Phase-1 PHASE="Phase-1">
+    <Gate-Phase-1 PHASE="Phase-1" STATUS="done">
       <goal>Employee Report works without AI — instant aggregation from DB for all 12 employees</goal>
       <commands>
         <command-1>curl -s http://localhost:5000/api/employee-report/list</command-1>
-        <command-2>curl -s "http://localhost:5000/api/employee-report?employee=Радько+Кирилл&amp;period=30d"</command-2>
       </commands>
       <required-evidence>
         <evidence-1>All 12 employees returned with non-zero cost</evidence-1>
-        <evidence-2>Session list present for employees with session_id</evidence-2>
-        <evidence-3>Anomaly list present (possibly empty)</evidence-3>
-        <evidence-4>UI renders employee list and drill-down report</evidence-4>
       </required-evidence>
+      <status-note>Passed originally; UI removed in simplify-ui refactor but endpoints retained.</status-note>
     </Gate-Phase-1>
 
-    <Gate-Phase-2 PHASE="Phase-2">
+    <Gate-Phase-2 PHASE="Phase-2" STATUS="done">
       <goal>LLM summarization works — sessions get summaries cached in DB</goal>
       <commands>
-        <command-1>curl -s -X POST "http://localhost:5000/api/session/summarize?sessionId=KNOWN_SESSION_ID"</command-1>
-        <command-2>curl -s http://localhost:5000/api/session/summarize/status</command-2>
+        <command-1>curl -s -X POST http://localhost:5000/api/session/summarize -H "Content-Type: application/json" -d '{"sessionId":"KNOWN"}'</command-1>
       </commands>
       <required-evidence>
         <evidence-1>Summary contains topic and is_work classification</evidence-1>
         <evidence-2>Second call returns from cache (instant)</evidence-2>
-        <evidence-3>Summarize All processes multiple sessions in background</evidence-3>
       </required-evidence>
+      <status-note>Passed. Migrated from Polza proxy to Anthropic native in Phase-3.</status-note>
     </Gate-Phase-2>
+
+    <Gate-Phase-3 PHASE="Phase-3" STATUS="done">
+      <goal>Per-generation AI analysis works end-to-end inside detail modal; topic grouping + bulk analyze functional; all results persist in generation_summaries</goal>
+      <commands>
+        <command-1>curl -s -X POST http://localhost:5000/api/generation/summarize -H "Content-Type: application/json" -d '{"generationId":"KNOWN_GEN_ID"}' | python3 -m json.tool</command-1>
+        <command-2>curl -s -X POST http://localhost:5000/api/generation-summaries -H "Content-Type: application/json" -d '{"ids":["id1","id2"]}'</command-2>
+        <command-3>PGPASSWORD=bond psql -h localhost -U dbadmin -d polza_dashboard -c "SELECT generation_id, topic, is_work, llm_cost FROM generation_summaries LIMIT 5;"</command-3>
+      </commands>
+      <required-evidence>
+        <evidence-1>First summarize call returns cached=false with full summary + usage metrics</evidence-1>
+        <evidence-2>Second call returns cached=true with same data</evidence-2>
+        <evidence-3>Batch endpoint returns populated summaries dict for previously-analyzed ids</evidence-3>
+        <evidence-4>DB table generation_summaries has rows with llm_cost &gt; 0 and non-empty summary/topic</evidence-4>
+        <evidence-5>UI: clicking row opens detail modal with AI block on top; empty state shows "$0.002" cost disclosure</evidence-5>
+        <evidence-6>UI: "По темам AI" tab groups analyzed rows by topic; "Без AI-анализа" bucket has bulk-analyze button</evidence-6>
+        <evidence-7>Deploy: /home/user/POLZA on VM, branch main, Flask running on port 5000</evidence-7>
+      </required-evidence>
+    </Gate-Phase-3>
 
   </PhaseGates>
 

@@ -1,13 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 3.2.0 -->
+<!-- VERSION: 3.3.0 -->
+<!-- CHANGELOG:
+       3.3.0 (2026-04-21): Added M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-ANTHROPIC.
+                           Deprecated M-EMPLOYEE-REPORT/M-EMPLOYEE-UI (endpoints remain but UI
+                           removed in simplify-ui refactor). Updated M-STATIC for per-generation
+                           AI analysis inside detail modal, "По темам AI" tab, bulk-analyze flow.
+                           Fixed deploy path constraint.
+       3.2.0: Session backfill thread, employee monitor phase.
+       3.1.0: Session summaries, 95-chunk SocratiCode index.
+-->
 
-<KnowledgeGraph project="polza-dashboard" version="3.2.0">
+<KnowledgeGraph project="polza-dashboard" version="3.3.0">
 
   <M-APP NAME="Flask App" TYPE="ENTRY_POINT">
-    <purpose>Flask web-server v3: DB-backed API + proxy for detail/log + background backfill</purpose>
+    <purpose>Flask web-server v3: DB-backed API + proxy for detail/log + background backfill + per-generation AI summarize</purpose>
     <path>polza_dashboard.py</path>
-    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-ANOMALY, M-EMPLOYEE-REPORT</depends>
+    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-ANOMALY, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-ANTHROPIC</depends>
     <annotations>
       <fn-index PURPOSE="Serve index.html" />
       <fn-config PURPOSE="Auth config + keys from DB + sync status" />
@@ -20,25 +29,24 @@
       <fn-sync_run PURPOSE="POST /api/sync/run — synchronous sync" />
       <fn-balance PURPOSE="Account balance proxy" />
       <fn-health PURPOSE="DB health check" />
-      <fn-sessions PURPOSE="GET /api/db/sessions — aggregated session data" />
-      <fn-employee_list PURPOSE="GET /api/employee-report/list — all employees with aggregated cost/tokens/requests" />
-      <fn-employee_report PURPOSE="GET /api/employee-report — single employee report with sessions, anomalies, heatmap" />
+      <fn-gen_summarize PURPOSE="POST /api/generation/summarize — per-generation AI analysis via Haiku 4.5" />
+      <fn-gen_summaries_batch PURPOSE="POST /api/generation-summaries — batch prefetch cached summaries by ID list" />
+      <fn-gen_summary_delete PURPOSE="DELETE /api/generation/summary — drop cache, force regeneration" />
+      <fn-session_summarize PURPOSE="POST /api/session/summarize — session-level summary (only when session_id exists)" />
     </annotations>
   </M-APP>
 
   <M-DB NAME="Database Layer" TYPE="DATA_LAYER">
-    <purpose>SQLAlchemy ORM: api_keys + generations + session_summaries tables in PostgreSQL</purpose>
+    <purpose>SQLAlchemy ORM: api_keys + generations + session_summaries + generation_summaries tables in PostgreSQL</purpose>
     <path>db.py</path>
     <depends>M-APP</depends>
     <annotations>
       <m-api_keys PURPOSE="Registered API keys with sync metadata (last_sync_at, total_synced)" />
       <m-generations PURPOSE="Cached generation records: includes session_id, device_id, source_key_name" />
       <m-session_summaries PURPOSE="LLM summaries cache: session_id PK, source_key, summary, topic, is_work, project_guess, risk_flags, llm_cost" />
-      <fn-init_db PURPOSE="Create tables on startup (including session_summaries)" />
-      <fn-to_dict PURPOSE="Serialize Generation to API-compatible JSON" />
-      <fn-summary_get_or_none PURPOSE="Get summary by session_id, None if not cached" />
-      <fn-summary_upsert PURPOSE="INSERT or UPDATE summary for a session" />
-      <fn-summary_list_by_key PURPOSE="List summaries for employee in date range" />
+      <m-generation_summaries PURPOSE="Per-generation LLM summaries cache: generation_id PK, summary, topic, is_work, project_guess, risk_flags, llm_model, llm_cost, cache_creation_tokens, cache_read_tokens, input_tokens, output_tokens" />
+      <fn-init_db PURPOSE="Create tables on startup (all four tables via Base.metadata.create_all)" />
+      <fn-to_dict PURPOSE="Serialize ORM objects to API-compatible JSON" />
     </annotations>
   </M-DB>
 
@@ -68,6 +76,7 @@
       <fn-status PURPOSE="GET /api/sessions/backfill/status — JSON: running, enriched, remaining, errorMsg, lastUpdate" />
       <constraint-error_pause>Auto-pauses if 45+ errors per batch (API rate limit)</constraint-error_pause>
       <constraint-batch_size>50 records per batch, 0.5s delay between batches</constraint-batch_size>
+      <coverage-note>Only 25% of generations have session_id (1991/7970 as of 2026-04-21). Backfill helps where externalUserId is present in Polza.AI metadata; the rest stays without a session anchor — semantic grouping by AI-topic is the workaround.</coverage-note>
     </annotations>
   </M-BACKFILL>
 
@@ -81,25 +90,33 @@
   </M-KEYS>
 
   <M-STATIC NAME="Frontend Assets" TYPE="UI_COMPONENT">
-    <purpose>SPA dashboard: table, charts, sidebar, detail modal, sessions view, backfill indicator — reads from DB</purpose>
+    <purpose>SPA dashboard: table, charts, sidebar, detail modal with embedded AI-analysis, topic-grouping tab, backfill indicator</purpose>
     <path>static/index.html, static/style.css, static/app.js</path>
     <depends>M-APP</depends>
     <annotations>
-      <fn-state PURPOSE="Global state management (S object) — includes sessions, sessionsLoading, expandedSession" />
-      <fn-render PURPOSE="Table, cards, pagination, charts, session cards rendering" />
+      <fn-state PURPOSE="Global state management (S object): items, filtered, summary_{id}, sessSum_{sid} caches" />
+      <fn-render PURPOSE="Table rendering with ai-cell (compact), pagination, summary cards, charts" />
+      <fn-render_ai_section PURPOSE="Render AI analysis block INSIDE detail modal — empty state with 'Проанализировать' button or filled state with topic/summary/flags/session sub-block" />
+      <fn-render_ai_cell PURPOSE="Compact table cell: grey 🧠 (unanalyzed) or chip with topic + flag icons (analyzed, tooltip has full text)" />
+      <fn-run_gen_analysis PURPOSE="Trigger POST /api/generation/summarize — manual only, no auto-calls" />
+      <fn-run_session_analysis PURPOSE="Trigger POST /api/session/summarize from within detail modal sub-block" />
+      <fn-prefetch_summaries PURPOSE="Batch POST /api/generation-summaries — populates AI cells on page load from DB cache" />
+      <fn-bulk_analyze PURPOSE="Mass-analyze unanalyzed rows in a 'По темам AI' group — concurrency=3, progressive UI ⏳ N/total" />
+      <fn-group_items PURPOSE="Grouping: flat, day, model, key, topic (AI-topic semantic grouping); unanalyzed rows go to '🤖 Без AI-анализа' bucket" />
       <fn-charts PURPOSE="Chart.js analytics: timeline, models, cache, keys" />
       <fn-sidebar PURPOSE="Overlay sidebar with key paste" />
-      <fn-detail PURPOSE="Modal with full log — backend resolves token" />
+      <fn-detail PURPOSE="Modal with full log — backend resolves token. Now embeds M-LLM-GEN-SUMMARIZE results on top." />
       <fn-autorefresh PURPOSE="Auto-refresh every 60s — reads from DB (fast)" />
-      <fn-sessions_view PURPOSE="Session cards with expand, duration, cost, cache bar, models" />
       <fn-backfill_ui PURPOSE="Topbar indicator: ⏳/✅/❌ status, polling every 2s, start/stop/retry buttons" />
       <fn-key_filter PURPOSE="Dropdown filter by API key name" />
       <fn-theme PURPOSE="Dark/light theme toggle with localStorage" />
+      <tab-PAGE="📋 Плоский / 📅 По дням / 🤖 По моделям / 🔑 По ключам / 🧠 По темам AI" />
+      <css-classes>ai-cell, ai-cell-empty, ai-cell-done, ai-cell-personal, ai-block, ai-block-header, ai-block-empty, ai-block-body, ai-topic-big, ai-summary-text, ai-session-block, ai-session-header, ai-session-body, topic-group-header, topic-group-unanalyzed, btn-group-analyze, summary-work-badge, summary-flags</css-classes>
     </annotations>
   </M-STATIC>
 
   <M-SUMMARY-STORE NAME="Session Summary Store" TYPE="DATA_LAYER">
-    <purpose>SQLAlchemy model + CRUD for session_summaries table — caches LLM summaries per session</purpose>
+    <purpose>SQLAlchemy model + CRUD for session_summaries table — caches LLM summaries per chat session</purpose>
     <path>db.py</path>
     <depends>M-DB</depends>
     <annotations>
@@ -111,42 +128,95 @@
     </annotations>
   </M-SUMMARY-STORE>
 
-  <M-ANOMALY NAME="Anomaly Detector" TYPE="CORE_LOGIC">
-    <purpose>Detect suspicious usage patterns: off-hours, weekends, unusual models, burst activity</purpose>
+  <M-GEN-SUMMARY-STORE NAME="Generation Summary Store" TYPE="DATA_LAYER">
+    <purpose>SQLAlchemy model + CRUD for generation_summaries table — persistent cache of per-generation AI analysis results. 100% cost savings on repeated views.</purpose>
+    <path>db.py</path>
+    <depends>M-DB</depends>
+    <annotations>
+      <m-generation_summaries PURPOSE="ORM model: generation_id PK, summary, topic, is_work, project_guess, risk_flags, llm_model, llm_cost, cache_creation_tokens, cache_read_tokens, input_tokens, output_tokens, created_at, updated_at" />
+      <fn-gen_summary_get_or_none PURPOSE="Fetch cached summary for a generation, or None" />
+      <fn-gen_summary_get_many PURPOSE="Batch fetch by list of generation_ids — returns dict {id: to_dict(), ...}. Used by frontend prefetch on page load" />
+      <fn-gen_summary_upsert PURPOSE="INSERT or UPDATE summary with full usage metrics" />
+      <fn-gen_summary_delete PURPOSE="Remove cached summary — triggers regeneration on next request (force=true path)" />
+      <log-prefix>[GenSummaryStore]</log-prefix>
+      <block-marker>START_BLOCK_GEN_SUMMARY / START_BLOCK_GEN_SUMMARY_CRUD</block-marker>
+    </annotations>
+  </M-GEN-SUMMARY-STORE>
+
+  <M-LLM-ANTHROPIC NAME="Anthropic API Integration" TYPE="INTEGRATION">
+    <purpose>Direct Anthropic Messages API integration (NOT proxied through Polza). Native payload format with prompt-caching support.</purpose>
+    <path>polza_dashboard.py (config block + _llm_call_summarize helper)</path>
+    <depends>M-APP</depends>
+    <annotations>
+      <config-LLM_API_URL PURPOSE="Anthropic endpoint URL, default https://api.anthropic.com/v1/messages, overridden from .env" />
+      <config-LLM_MODEL PURPOSE="Model ID or alias. Default 'claude-haiku-4-5' (alias without date — Anthropic auto-serves latest Haiku 4.5 snapshot)" />
+      <config-LLM_API_KEY PURPOSE="Anthropic API key (sk-ant-api03-*). Separate from POLZA_API_KEY. Loaded from .env at startup." />
+      <format-headers PURPOSE="x-api-key + anthropic-version: 2023-06-01 + content-type: application/json. NO Authorization: Bearer." />
+      <format-payload PURPOSE="system is TOP-LEVEL array with cache_control blocks (NOT a message). messages contains only user/assistant turns." />
+      <format-response PURPOSE="content[].text for output (NOT choices[0].message.content). usage.{input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens}." />
+      <prompt-caching PURPOSE="cache_control: {type: ephemeral} on system block. Haiku 4.5 minimum = 2048 tokens; current system prompt is ~350 tokens so cache is a no-op until prompt grows. Silently accepted by API." />
+      <pricing-haiku4_5 PURPOSE="input $1/M, output $5/M, cache_write $1.25/M, cache_read $0.10/M — used in _llm_call_summarize to compute cost_usd in response." />
+      <log-prefix>[GenSummarize][LLM]</log-prefix>
+    </annotations>
+  </M-LLM-ANTHROPIC>
+
+  <M-LLM-GEN-SUMMARIZE NAME="Generation Summarizer" TYPE="CORE_LOGIC">
+    <purpose>Per-generation LLM analysis. Checks DB cache first; on miss, fetches Polza log, extracts user text, calls Anthropic, stores result. Manual trigger only (user clicks button in detail modal).</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-DB, M-GEN-SUMMARY-STORE, M-LLM-ANTHROPIC</depends>
+    <annotations>
+      <fn-api_generation_summarize PURPOSE="POST /api/generation/summarize — body: {generationId, force?}. Returns cached result or fresh LLM output." />
+      <fn-api_generation_summaries_batch PURPOSE="POST /api/generation-summaries — body: {ids: [...]}. Bulk prefetch for table render. Cap 500 ids." />
+      <fn-api_generation_summary_delete PURPOSE="DELETE /api/generation/summary?generationId=... — drop from cache, forces regeneration on next call." />
+      <fn-llm_call_summarize PURPOSE="Helper: builds Anthropic payload with cache_control, calls API, parses JSON from response content, computes cost. Raises on HTTP non-200 or empty content." />
+      <fn-extract_user_text_from_log PURPOSE="Helper: concatenate user-role messages from Polza log (fallback to any-role content if empty), cap at 4000 chars." />
+      <prompt-GEN_SUMMARIZE_PROMPT PURPOSE="Extended prompt — requests 3-5 sentence detailed summary with action, context, technologies, goal. Strict JSON output schema." />
+      <block-marker>START_BLOCK_GEN_SUMMARIZE_PROMPT / START_BLOCK_GEN_SUMMARIZE_HELPERS / START_BLOCK_GEN_CACHE_CHECK / START_BLOCK_GEN_CALL_LLM / START_BLOCK_GEN_CACHE_STORE</block-marker>
+      <log-prefix>[GenSummarize]</log-prefix>
+      <output-schema>{generationId, summary, topic, isWork, projectGuess, riskFlags[], llmModel, llmCost, cacheCreationTokens, cacheReadTokens, inputTokens, outputTokens, cached}</output-schema>
+      <cost-per-call>~$0.002 (first call). Repeat calls: $0 (DB cache hit).</cost-per-call>
+    </annotations>
+  </M-LLM-GEN-SUMMARIZE>
+
+  <M-SESSION-SUMMARIZER NAME="Session Summarizer" TYPE="CORE_LOGIC">
+    <purpose>LLM-powered summarization of a chat session — extracts task, topic, work/personal classification from user messages across all generations in a session</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-DB, M-SUMMARY-STORE, M-LLM-ANTHROPIC</depends>
+    <annotations>
+      <fn-summarize_single_session PURPOSE="Summarize single session — returns from cache or calls LLM (Anthropic native). Now uses prompt caching on system block." />
+      <fn-api_session_summarize PURPOSE="POST /api/session/summarize — body: {sessionId}. Accessible only when generation has session_id (sub-block in detail modal)." />
+      <log-prefix>[Summarizer]</log-prefix>
+      <block-marker>BLOCK_SUMMARY_CACHE_CHECK / BLOCK_FETCH_LOGS / BLOCK_CALL_LLM / BLOCK_PARSE_RESPONSE</block-marker>
+      <deprecated-endpoints>POST /api/session/summarize-all and GET /api/session/summarize/status still exist in code but are unreachable from current UI — kept for backwards compatibility.</deprecated-endpoints>
+    </annotations>
+  </M-SESSION-SUMMARIZER>
+
+  <M-ANOMALY NAME="Anomaly Detector" TYPE="CORE_LOGIC" STATUS="code-remains-ui-removed">
+    <purpose>Detect suspicious usage patterns: off-hours, weekends, unusual models, burst activity. Functions remain in polza_dashboard.py but no UI consumes them after simplify-ui refactor.</purpose>
     <path>polza_dashboard.py</path>
     <depends>M-DB</depends>
     <annotations>
       <fn-detect PURPOSE="Analyze employee records, return anomaly list with type/severity/details" />
-      <rule-OFF_HOURS PURPOSE="22:00-08:00 — severity based on count (low/medium/high)" />
+      <rule-OFF_HOURS PURPOSE="22:00-08:00 — severity based on count" />
       <rule-WEEKEND PURPOSE="Saturday/Sunday — severity by count" />
       <rule-UNUSUAL_MODEL PURPOSE="Model not in employee top 3" />
-      <rule-BURST_50_PLUS PURPOSE=">50 generations in 1-hour window" />
+      <rule-BURST_50_PLUS PURPOSE="&gt;50 generations in 1-hour window" />
       <log-prefix>[Anomaly]</log-prefix>
+      <status-note>UI removed in simplify-ui refactor (2026-04-21). Anomaly concept migrated into AI risk_flags returned by M-LLM-GEN-SUMMARIZE.</status-note>
     </annotations>
   </M-ANOMALY>
 
-  <M-EMPLOYEE-REPORT NAME="Employee Report API" TYPE="ENTRY_POINT">
-    <purpose>Fast aggregated report per employee — pure SQL, no AI, instant response</purpose>
+  <M-EMPLOYEE-REPORT NAME="Employee Report API" TYPE="ENTRY_POINT" STATUS="deprecated-endpoints-remain">
+    <purpose>Fast aggregated report per employee — pure SQL, no AI. Endpoints remain callable but no frontend consumer after simplify-ui refactor.</purpose>
     <path>polza_dashboard.py</path>
     <depends>M-DB, M-SUMMARY-STORE, M-ANOMALY</depends>
     <annotations>
       <fn-report_list PURPOSE="GET /api/employee-report/list — summary: each employee with cost/tokens/requests" />
       <fn-report PURPOSE="GET /api/employee-report — single employee: sessions, anomalies, heatmap, models" />
       <log-prefix>[EmployeeReport]</log-prefix>
+      <status-note>UI tab '📊 По сотрудникам' removed in simplify-ui refactor. Endpoints kept for potential future re-use or external integrations. Not wired to current SPA.</status-note>
     </annotations>
   </M-EMPLOYEE-REPORT>
-
-  <M-EMPLOYEE-UI NAME="Employee Monitor UI" TYPE="UI_COMPONENT">
-    <purpose>Frontend: employee list with costs, drill-down report with sessions, anomalies, heatmap</purpose>
-    <path>static/app.js, static/index.html, static/style.css</path>
-    <depends>M-STATIC</depends>
-    <annotations>
-      <fn-load_employees PURPOSE="Load employee list with aggregated costs for period" />
-      <fn-render_employee_report PURPOSE="Render full report: summary cards, anomalies, heatmap, models, sessions" />
-      <fn-render_heatmap PURPOSE="Render hourly activity heatmap grid (weekday x hour)" />
-      <tab-PAGE="📊 По сотрудникам" />
-    </annotations>
-  </M-EMPLOYEE-UI>
 
   <Constraints>
     <constraint-sort>Polza.AI API supports only sortBy=createdAt|clientCost; DB supports all columns</constraint-sort>
@@ -157,7 +227,12 @@
     <constraint-db>PostgreSQL 16, SQLAlchemy ORM, psycopg2-binary driver</constraint-db>
     <constraint-session_metadata>session_id/device_id from metadata.externalUserId JSON — only via detail API, NOT list API</constraint-session_metadata>
     <constraint-backfill_survives>Backfill runs in server thread — survives browser refresh, stoppable via API</constraint-backfill_survives>
-    <constraint-deploy>GitHub → git pull on VM → cp to /home/user/POLZA.AI/ → restart Flask</constraint-deploy>
+    <constraint-deploy>GitHub main → git fetch/reset on VM at /home/user/POLZA/ → restart Flask. Single working copy since consolidation 2026-04-21.</constraint-deploy>
+    <constraint-llm_alias>LLM_MODEL in .env should be 'claude-haiku-4-5' (alias) for auto-latest; fixed date versions (e.g. claude-haiku-4-5-20251001) pin a specific snapshot.</constraint-llm_alias>
+    <constraint-llm_manual>AI analysis is never auto-triggered. User must click "🧠 Проанализировать" button in detail modal. Cost is disclosed in UI ($0.002).</constraint-llm_manual>
+    <constraint-llm_cache_first>/api/generation/summarize ALWAYS checks DB cache first unless force=true. No silent recomputation.</constraint-llm_cache_first>
+    <constraint-session_coverage>Only ~25% of generations have session_id (sparse Polza.AI metadata). Session-level features must gracefully degrade when session_id is absent; semantic topic grouping is the fallback for aggregated views.</constraint-session_coverage>
+    <constraint-prompt_cache_min>Anthropic prompt caching requires ≥2048 tokens for Haiku 4.5. Current system prompts are smaller, so cache_creation_input_tokens=0 is expected — DB cache provides the economy instead.</constraint-prompt_cache_min>
   </Constraints>
 
 </KnowledgeGraph>
