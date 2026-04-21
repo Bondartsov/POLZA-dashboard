@@ -1178,6 +1178,8 @@ def api_generation_summarize():
             ],
         }
 
+        print(f"[GenSummarize][LLM] url={LLM_API_URL} model={LLM_MODEL} key_len={len(LLM_API_KEY)} key_prefix={LLM_API_KEY[:10]}...")
+
         _llm_headers = {
             "x-api-key": LLM_API_KEY,
             "anthropic-version": "2023-06-01",
