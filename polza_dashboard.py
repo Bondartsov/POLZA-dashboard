@@ -1004,19 +1004,29 @@ def _summarize_single_session(session_id: str):
         timeout=60,
     )
 
-    if r.status_code != 200:
-        raise ValueError(f"LLM_API_ERROR: HTTP {r.status_code}")
+    print(f"[Summarizer][LLM] Status: {r.status_code}")
 
-    llm_response = r.json()
+    if r.status_code != 200:
+        print(f"[Summarizer][LLM] Body: {r.text[:300]}")
+        raise ValueError(f"LLM_API_ERROR: HTTP {r.status_code} - {r.text[:100]}")
+
+    try:
+        llm_response = r.json()
+    except Exception as e:
+        print(f"[Summarizer][LLM] JSON parse error: {e}")
+        raise ValueError("LLM returned non-JSON response")
+
     llm_cost = 0.0
     try:
         usage = llm_response.get("usage", {})
-        # Estimate cost (Haiku pricing)
         llm_cost = (usage.get("prompt_tokens", 0) * 0.0008 + usage.get("completion_tokens", 0) * 0.004) / 1000
-    except Exception:
+    except:
         pass
 
-    content = llm_response["choices"][0]["message"]["content"]
+    content = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not content:
+        raise ValueError("LLM returned empty content")
+
     print(f"[Summarizer][summarize_session][BLOCK_CALL_LLM] LLM response received ({len(content)} chars)")
     # END_BLOCK_CALL_LLM
 
@@ -1060,10 +1070,10 @@ def _summarize_single_session(session_id: str):
     return result
 
 
-@app.route("/api/session/summarize", methods=["POST"])
+@app.route("/api/session/summarize", methods=["POST", "GET"])
 def api_session_summarize():
     """Summarize a single session — returns from cache or calls LLM."""
-    session_id = request.args.get("sessionId") or request.json.get("sessionId", "")
+    session_id = request.args.get("sessionId") or (request.json or {}).get("sessionId", "")
     if not session_id:
         return jsonify({"error": "sessionId required"}), 400
 
@@ -1072,15 +1082,17 @@ def api_session_summarize():
         return jsonify(result)
     except ValueError as e:
         err = str(e)
-        print(f"[Summarizer][summarize] ERROR: {err}")
+        print(f"[Summarizer][summarize] ERROR: {err} for session {session_id[:16]}")
         if err == "NO_GENERATIONS":
             return jsonify({"error": "У сессии нет генераций в БД", "code": "NO_GENERATIONS"}), 404
         if err == "NO_USER_MESSAGES":
             return jsonify({"error": "Не удалось получить промпты из логов", "code": "NO_USER_MESSAGES"}), 404
-        return jsonify({"error": err}), 500
+        return jsonify({"error": err, "sessionId": session_id}), 500
     except Exception as e:
-        print(f"[Summarizer][summarize] ERROR: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f"[Summarizer][summarize] CRITICAL ERROR: {e} for session {session_id[:16]}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Internal server error during summarization", "details": str(e), "sessionId": session_id}), 500
 
 
 def _summarize_all_worker(employee: str):
