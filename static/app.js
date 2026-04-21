@@ -446,13 +446,13 @@ function renderRows(items) {
 }
 
 // ─── START_BLOCK_AI_CELL
-// Compact preview badge or summarize button. Full text lives in modal.
+// Minimal cell: topic (if analyzed) or grey 🧠 (not analyzed).
+// Clicking the row (not the cell) opens the detail modal — where AI analysis lives.
 function renderAiCell(it) {
   const sum = S[`summary_${it.id}`];
   if (!sum) {
-    return `<button class="btn-ai-summarize" onclick="event.stopPropagation();summarizeGeneration('${it.id}',this)" title="AI суммаризация">🧠</button>`;
+    return `<span class="ai-cell ai-cell-empty" title="Не проанализировано — откройте детали">🧠</span>`;
   }
-  const topic = sum.topic || 'Готово';
   const isPersonal = sum.isWork === false;
   const flags = Array.isArray(sum.riskFlags) ? sum.riskFlags : [];
   const flagIcons = [
@@ -461,28 +461,42 @@ function renderAiCell(it) {
     flags.includes('sensitive') ? '🔒' : '',
     flags.includes('high_cost') ? '💸' : '',
   ].filter(Boolean).join('');
-  return `<div class="ai-summary-badge ${isPersonal ? 'ai-personal' : ''}" onclick="event.stopPropagation();openSummaryModal('${it.id}')" title="Нажмите, чтобы открыть полное описание">
-    <div class="ai-topic">${flagIcons ? flagIcons + ' ' : ''}${esc(topic)}</div>
-    <div class="ai-detail-preview">${esc(sum.summary || '').slice(0, 90)}${(sum.summary || '').length > 90 ? '…' : ''}</div>
-  </div>`;
+  const topic = sum.topic || 'Готово';
+  const tooltip = `${topic}\n\n${sum.summary || ''}`;
+  return `<span class="ai-cell ai-cell-done ${isPersonal ? 'ai-cell-personal' : ''}" title="${esc(tooltip)}">
+    ${flagIcons ? `<span class="ai-cell-flags">${flagIcons}</span>` : '<span class="ai-cell-icon">🧠</span>'}
+    <span class="ai-cell-topic">${esc(topic)}</span>
+  </span>`;
 }
 // ─── END_BLOCK_AI_CELL
 
 function groupItems(items) {
   if (S.groupMode === 'flat') return [{ label: '', items }];
   const groups = new Map();
-  const noSessionKey = '__no_session__';
+  const unanalyzedKey = '__unanalyzed__';
   for (const it of items) {
     let key;
     if (S.groupMode === 'day') key = (it.createdAt||'').slice(0,10);
     else if (S.groupMode === 'model') key = it.modelDisplayName||it.model||'?';
     else if (S.groupMode === 'key') key = it.apiKeyName||it._sourceKey||it.apiKeyShort||'?';
-    else if (S.groupMode === 'session') key = it._sessionId || noSessionKey;
+    else if (S.groupMode === 'topic') {
+      const sum = S[`summary_${it.id}`];
+      key = sum && sum.topic ? sum.topic : unanalyzedKey;
+    }
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(it);
   }
   const result = [...groups.entries()].map(([label, gItems]) => ({ label, items: gItems }));
-  result.sort((a,b) => { const da = a.items[0]?.createdAt||'', db = b.items[0]?.createdAt||''; return S.sortOrder==='desc'?db.localeCompare(da):da.localeCompare(db); });
+  // Topic grouping: sort by group size desc, unanalyzed last
+  if (S.groupMode === 'topic') {
+    result.sort((a, b) => {
+      if (a.label === unanalyzedKey) return 1;
+      if (b.label === unanalyzedKey) return -1;
+      return b.items.length - a.items.length;
+    });
+  } else {
+    result.sort((a,b) => { const da = a.items[0]?.createdAt||'', db = b.items[0]?.createdAt||''; return S.sortOrder==='desc'?db.localeCompare(da):da.localeCompare(db); });
+  }
   return result;
 }
 
@@ -494,100 +508,75 @@ function groupLabel(g) {
   if (S.groupMode==='day') { const d=new Date(g.label); return `📅 ${d.toLocaleDateString('ru-RU',{weekday:'short',day:'numeric',month:'short'})} — ${items.length} зап., ${fmtCost(tc)} ₽, кэш прочитано ${cp}%${fe}`; }
   if (S.groupMode==='model') return `🤖 ${g.label} — ${items.length} зап., ${fmtCost(tc)} ₽${fe}`;
   if (S.groupMode==='key') return `👤 ${g.label} — ${items.length} зап., ${fmtCost(tc)} ₽, ${fmtNum(tt)} токенов, кэш ${cp}%${fe}`;
-  if (S.groupMode==='session') {
-    const sid = g.label;
-    const isNoSession = sid === '__no_session__';
-    const keyName = items[0]?.apiKeyName || items[0]?._sourceKey || '?';
-    const shortId = isNoSession ? 'Без сессии' : (sid.length > 24 ? sid.slice(0, 24) + '…' : sid);
-    const sessBtn = isNoSession
-      ? ''
-      : `<button class="btn-session-ai" onclick="event.stopPropagation();summarizeSession('${esc(sid)}',this)" title="AI-суммаризация сессии целиком">🧠 Суммаризировать сессию</button>`;
-    const sessPreview = S[`sessSum_${sid}`] ? renderSessionSummaryInline(sid) : '';
+  if (S.groupMode==='topic') {
+    if (g.label === '__unanalyzed__') {
+      const ids = items.map(i => i.id).join('|');
+      return `
+        <div class="topic-group-header topic-group-unanalyzed">
+          <div class="topic-group-main">
+            🤖 <b>Без AI-анализа</b> — ${items.length} запросов, ${fmtCost(tc)} ₽
+            <div class="topic-group-hint">Нажмите, чтобы проанализировать всю группу через Claude Haiku (~$0.002/запрос)</div>
+          </div>
+          <button class="btn-group-analyze" onclick="event.stopPropagation();bulkAnalyze(this,'${ids}')">🧠 Проанализировать (${items.length})</button>
+        </div>`;
+    }
+    // Analyzed topic — group header shows topic + stats
+    const sampleIds = items.slice(0, 3).map(i => i.id);
+    // Check isWork flag from summaries in the group (majority vote for display)
+    let personalCount = 0;
+    for (const it of items) {
+      const s = S[`summary_${it.id}`];
+      if (s && s.isWork === false) personalCount++;
+    }
+    const personalBadge = personalCount > 0
+      ? `<span class="topic-personal-badge" title="${personalCount} из ${items.length} помечены как возможно личное">⚠️ ${personalCount}</span>`
+      : '';
     return `
-      <div class="session-group-header">
-        <div class="session-group-main">
-          💬 <b>${esc(shortId)}</b> · 👤 ${esc(keyName)} — ${items.length} зап., ${fmtCost(tc)} ₽, кэш ${cp}%${fe}
+      <div class="topic-group-header">
+        <div class="topic-group-main">
+          🧠 <b>${esc(g.label)}</b> — ${items.length} запросов, ${fmtCost(tc)} ₽, кэш ${cp}%${fe} ${personalBadge}
         </div>
-        ${sessBtn}
-      </div>
-      ${sessPreview}
-    `;
+      </div>`;
   }
   return g.label;
 }
 
-function renderSessionSummaryInline(sessionId) {
-  const sum = S[`sessSum_${sessionId}`];
-  if (!sum) return '';
-  const isPersonal = sum.isWork === false;
-  return `<div class="session-summary-inline ${isPersonal ? 'personal' : ''}" onclick="event.stopPropagation();openSessionSummaryModal('${esc(sessionId)}')">
-    <div class="sess-topic">${esc(sum.topic || 'Суммаризация сессии')}${isPersonal ? ' ⚠️' : ''}</div>
-    <div class="sess-preview">${esc(sum.summary || '').slice(0, 200)}${(sum.summary||'').length > 200 ? '…' : ''}</div>
-  </div>`;
-}
+// Bulk-analyze: kick off summarize requests in parallel with a small concurrency cap.
+async function bulkAnalyze(btnEl, idsStr) {
+  const ids = idsStr.split('|').filter(Boolean);
+  if (!ids.length) return;
+  const total = ids.length;
+  btnEl.disabled = true;
+  let done = 0;
+  const updateBtn = () => { btnEl.textContent = `⏳ ${done}/${total}`; };
+  updateBtn();
 
-async function summarizeSession(sessionId, btnEl) {
-  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Генерация...'; }
-  try {
-    const r = await fetch('/api/session/summarize', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({sessionId}),
-    });
-    const data = await r.json();
-    if (!r.ok) {
-      if (btnEl) { btnEl.textContent = '❌ ' + (data.error || 'Ошибка'); btnEl.disabled = false; }
-      return;
+  const CONCURRENCY = 3;
+  let idx = 0;
+  async function worker() {
+    while (idx < ids.length) {
+      const id = ids[idx++];
+      try {
+        const r = await fetch('/api/generation/summarize', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({generationId: id}),
+        });
+        if (r.ok) {
+          const data = await r.json();
+          S[`summary_${id}`] = data;
+        }
+      } catch(e) {}
+      done++;
+      updateBtn();
     }
-    S[`sessSum_${sessionId}`] = data;
-    renderTable();
-    openSessionSummaryModal(sessionId);
-  } catch(e) {
-    if (btnEl) { btnEl.textContent = '❌ ' + e.message; btnEl.disabled = false; }
   }
-}
+  const workers = [];
+  for (let i = 0; i < Math.min(CONCURRENCY, total); i++) workers.push(worker());
+  await Promise.all(workers);
 
-function openSessionSummaryModal(sessionId) {
-  const sum = S[`sessSum_${sessionId}`];
-  if (!sum) return;
-  const isPersonal = sum.isWork === false;
-  const flags = Array.isArray(sum.riskFlags) ? sum.riskFlags : [];
-  const flagLabels = {
-    personal: '👤 Личное использование',
-    off_hours: '🌙 Вне рабочего времени',
-    unusual_model: '🤔 Нестандартная модель',
-    high_cost: '💸 Высокая стоимость',
-    sensitive: '🔒 Чувствительные данные',
-  };
-  const flagsHtml = flags.length
-    ? `<div class="summary-flags">${flags.map(f => `<span class="flag">${esc(flagLabels[f] || f)}</span>`).join('')}</div>`
-    : '';
-  const projectHtml = sum.projectGuess
-    ? `<div class="summary-section"><h4>🗂 Проект</h4><p>${esc(sum.projectGuess)}</p></div>`
-    : '';
-  const body = `
-    <div class="summary-modal-body">
-      <div class="summary-topic-row">
-        <div class="summary-topic">💬 ${esc(sum.topic || 'Сессия')}</div>
-        <div class="summary-work-badge ${isPersonal ? 'personal' : 'work'}">
-          ${isPersonal ? '⚠️ Возможно личное' : '✅ Рабочая сессия'}
-        </div>
-      </div>
-      ${flagsHtml}
-      <div class="summary-section">
-        <h4>📝 Описание сессии</h4>
-        <p class="summary-full-text">${esc(sum.summary || '')}</p>
-      </div>
-      ${projectHtml}
-      <div class="summary-meta">
-        Сессия: ${esc(sessionId)} · ключ: ${esc(sum.sourceKey || '?')}
-        ${sum.llmCost ? ` · LLM cost: ${Number(sum.llmCost).toFixed(6)} USD` : ''}
-      </div>
-    </div>
-  `;
-  document.getElementById('modalTitle').textContent = '🧠 Саммари сессии';
-  document.getElementById('modalBody').innerHTML = body;
-  document.getElementById('modalOverlay').classList.add('open');
+  btnEl.textContent = `✅ Готово (${done}/${total})`;
+  renderTable();
 }
 
 function renderPagination() {
@@ -634,7 +623,12 @@ async function openDetail(genId) {
       apiGet('/api/generations/'+genId+'/log').catch(()=>null)
     ]);
     const li = S.items.find(i=>i.id===genId)||{};
-    let h = '<div class="detail-grid">';
+    let h = '';
+
+    // AI Analysis section goes on top (collapsible, manual trigger)
+    h += renderAiSection(genId, li);
+
+    h += '<div class="detail-grid">';
     h += dc('Модель', li.modelDisplayName||detail.finalEndpointSlug||'—');
     h += dc('Провайдер', detail.finalEndpointSlug||li.provider||'—');
     h += dc('Тип', `<span class="badge badge-${detail.requestType||li.requestType}">${detail.requestType||li.requestType} ${detail.apiType||''}</span>`);
@@ -824,11 +818,118 @@ async function backfillStop() {
 }
 
 // ─── START_BLOCK_AI_SUMMARIZE
-// Per-generation AI summarization. Triggers LLM or returns cached result from DB.
+// AI analysis is rendered INSIDE the detail modal (not as a separate modal).
+// Triggered manually by the user via "🧠 Проанализировать" button.
 
-async function summarizeGeneration(genId, btnEl, opts) {
-  const force = !!(opts && opts.force);
-  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳'; }
+const FLAG_LABELS = {
+  personal: '👤 Личное использование',
+  off_hours: '🌙 Вне рабочего времени',
+  unusual_model: '🤔 Нестандартная модель',
+  high_cost: '💸 Высокая стоимость',
+  sensitive: '🔒 Чувствительные данные',
+};
+
+function renderAiSection(genId, li) {
+  const sum = S[`summary_${genId}`];
+  const sessionId = li && li._sessionId ? li._sessionId : '';
+  const sessSum = sessionId ? S[`sessSum_${sessionId}`] : null;
+
+  // Header with collapse arrow
+  let html = `<div class="ai-block" id="aiBlock_${genId}">`;
+
+  if (!sum) {
+    // Not yet analyzed — show call-to-action
+    html += `
+      <div class="ai-block-header">
+        <div class="ai-block-title">🧠 AI-анализ запроса</div>
+        <div class="ai-block-status">не выполнен</div>
+      </div>
+      <div class="ai-block-empty">
+        <p>Модель проанализирует промпт и выдаст: тему, описание задачи, предполагаемый проект, флаги рисков.</p>
+        <button class="btn btn-primary" onclick="runGenAnalysis('${genId}')">🧠 Проанализировать</button>
+        <span class="ai-block-hint">Вызов ~ $0.002 · Claude Haiku 4.5</span>
+      </div>`;
+  } else {
+    const isPersonal = sum.isWork === false;
+    const flags = Array.isArray(sum.riskFlags) ? sum.riskFlags : [];
+    const flagsHtml = flags.length
+      ? `<div class="summary-flags">${flags.map(f => `<span class="flag">${esc(FLAG_LABELS[f] || f)}</span>`).join('')}</div>`
+      : '';
+    const projectHtml = sum.projectGuess
+      ? `<div class="ai-field"><span class="ai-field-label">🗂 Проект:</span> <span class="ai-field-value">${esc(sum.projectGuess)}</span></div>`
+      : '';
+    const metaHtml = `
+      <div class="ai-meta">
+        ${sum.cached ? '✅ из кеша БД' : '🆕 только что'}
+        ${sum.llmModel ? ` · ${esc(sum.llmModel)}` : ''}
+        ${sum.updatedAt ? ` · ${fmtDate(sum.updatedAt)}` : ''}
+        ${sum.llmCost != null ? ` · $${Number(sum.llmCost).toFixed(6)}` : ''}
+        ${sum.inputTokens ? ` · in ${fmtNum(sum.inputTokens)} / out ${fmtNum(sum.outputTokens||0)}` : ''}
+        ${sum.cacheReadTokens ? ` · cache_read ${fmtNum(sum.cacheReadTokens)}` : ''}
+      </div>`;
+
+    html += `
+      <div class="ai-block-header">
+        <div class="ai-block-title">🧠 AI-анализ запроса</div>
+        <div class="summary-work-badge ${isPersonal ? 'personal' : 'work'}">
+          ${isPersonal ? '⚠️ Возможно личное' : '✅ Рабочий запрос'}
+        </div>
+      </div>
+      <div class="ai-block-body">
+        <div class="ai-topic-big">${esc(sum.topic || '—')}</div>
+        ${flagsHtml}
+        <div class="ai-summary-text">${esc(sum.summary || '')}</div>
+        ${projectHtml}
+        ${metaHtml}
+        <div class="ai-block-actions">
+          <button class="btn btn-small" onclick="runGenAnalysis('${genId}', true)">🔄 Пересуммаризировать</button>
+        </div>
+      </div>`;
+  }
+
+  // Session block (if generation has session_id)
+  if (sessionId) {
+    html += `<div class="ai-session-block" id="aiSessBlock_${genId}">`;
+    if (!sessSum) {
+      html += `
+        <div class="ai-session-header">
+          <div>
+            <div class="ai-session-title">💬 Часть сессии</div>
+            <div class="ai-session-sid" title="${esc(sessionId)}">ID: ${esc(sessionId.slice(0, 32))}…</div>
+          </div>
+          <button class="btn btn-small btn-primary" onclick="runSessionAnalysis('${esc(sessionId)}', '${genId}')">🧠 Анализ сессии целиком</button>
+        </div>`;
+    } else {
+      const isPersonal = sessSum.isWork === false;
+      html += `
+        <div class="ai-session-header">
+          <div>
+            <div class="ai-session-title">💬 Сессия: ${esc(sessSum.topic || '—')}</div>
+            <div class="ai-session-sid" title="${esc(sessionId)}">ID: ${esc(sessionId.slice(0, 32))}…</div>
+          </div>
+          <div class="summary-work-badge ${isPersonal ? 'personal' : 'work'}" style="font-size:11px">
+            ${isPersonal ? '⚠️ Личная' : '✅ Рабочая'}
+          </div>
+        </div>
+        <div class="ai-session-body">${esc(sessSum.summary || '')}</div>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+async function runGenAnalysis(genId, force = false) {
+  const block = document.getElementById(`aiBlock_${genId}`);
+  if (block) {
+    block.innerHTML = `
+      <div class="ai-block-header">
+        <div class="ai-block-title">🧠 AI-анализ запроса</div>
+        <div class="ai-block-status">⏳ анализирую...</div>
+      </div>
+      <div class="ai-block-loading"><div class="spinner"></div> Claude Haiku обрабатывает промпт...</div>`;
+  }
   try {
     const r = await fetch('/api/generation/summarize', {
       method: 'POST',
@@ -837,88 +938,44 @@ async function summarizeGeneration(genId, btnEl, opts) {
     });
     const data = await r.json();
     if (!r.ok) {
-      if (btnEl) { btnEl.textContent = '❌'; btnEl.title = data.error || 'Ошибка'; btnEl.disabled = false; }
+      if (block) block.innerHTML = `<div class="ai-block-error">❌ ${esc(data.error || 'Ошибка анализа')}</div>`;
       return;
     }
-    // Cache & re-render row
     S[`summary_${genId}`] = data;
+    // Re-render section and table row badge
+    const li = S.items.find(i => i.id === genId) || {};
+    if (block) block.outerHTML = renderAiSection(genId, li);
     renderTable();
-    // Show modal with full text
-    openSummaryModal(genId);
   } catch(e) {
-    if (btnEl) { btnEl.textContent = '❌'; btnEl.title = e.message; btnEl.disabled = false; }
+    if (block) block.innerHTML = `<div class="ai-block-error">❌ ${esc(e.message)}</div>`;
   }
 }
 
-function openSummaryModal(genId) {
-  const sum = S[`summary_${genId}`];
-  if (!sum) return;
-  const flags = Array.isArray(sum.riskFlags) ? sum.riskFlags : [];
-  const isPersonal = sum.isWork === false;
-
-  const flagLabels = {
-    personal: '👤 Личное использование',
-    off_hours: '🌙 Вне рабочего времени',
-    unusual_model: '🤔 Нестандартная модель',
-    high_cost: '💸 Высокая стоимость',
-    sensitive: '🔒 Чувствительные данные',
-  };
-  const flagsHtml = flags.length
-    ? `<div class="summary-flags">${flags.map(f => `<span class="flag">${esc(flagLabels[f] || f)}</span>`).join('')}</div>`
-    : '';
-
-  const usageHtml = (sum.inputTokens || sum.outputTokens || sum.cacheReadTokens)
-    ? `<div class="summary-usage">
-        📥 input: ${fmtNum(sum.inputTokens||0)} ·
-        📤 output: ${fmtNum(sum.outputTokens||0)} ·
-        📦 cache_write: ${fmtNum(sum.cacheCreationTokens||0)} ·
-        💾 cache_read: ${fmtNum(sum.cacheReadTokens||0)}
-        ${sum.llmCost != null ? ` · стоимость LLM: $${Number(sum.llmCost).toFixed(6)}` : ''}
-      </div>`
-    : '';
-
-  const projectHtml = sum.projectGuess
-    ? `<div class="summary-section"><h4>🗂 Проект</h4><p>${esc(sum.projectGuess)}</p></div>`
-    : '';
-
-  const body = `
-    <div class="summary-modal-body">
-      <div class="summary-topic-row">
-        <div class="summary-topic">${esc(sum.topic || '—')}</div>
-        <div class="summary-work-badge ${isPersonal ? 'personal' : 'work'}">
-          ${isPersonal ? '⚠️ Возможно личное' : '✅ Рабочий запрос'}
-        </div>
-      </div>
-      ${flagsHtml}
-      <div class="summary-section">
-        <h4>📝 Что делал сотрудник</h4>
-        <p class="summary-full-text">${esc(sum.summary || '')}</p>
-      </div>
-      ${projectHtml}
-      ${usageHtml}
-      <div class="summary-actions">
-        <button class="btn btn-primary" onclick="openDetail('${genId}');closeModal()">🔍 Открыть детали генерации</button>
-        <button class="btn" onclick="regenerateSummary('${genId}')">🔄 Пересуммаризировать</button>
-      </div>
-      <div class="summary-meta">
-        Сохранено: ${sum.cached ? '✅ из кеша БД' : '🆕 только что'}
-        ${sum.llmModel ? ` · модель: ${esc(sum.llmModel)}` : ''}
-        ${sum.updatedAt ? ` · обновлено: ${fmtDate(sum.updatedAt)}` : ''}
-      </div>
-    </div>
-  `;
-
-  document.getElementById('modalTitle').textContent = '🧠 AI-суммаризация: ' + genId;
-  document.getElementById('modalBody').innerHTML = body;
-  document.getElementById('modalOverlay').classList.add('open');
-}
-
-async function regenerateSummary(genId) {
-  const btn = event && event.target;
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Генерация...'; }
-  // Drop cache in state so render will show spinner
-  delete S[`summary_${genId}`];
-  await summarizeGeneration(genId, null, {force: true});
+async function runSessionAnalysis(sessionId, genId) {
+  const sessBlock = document.getElementById(`aiSessBlock_${genId}`);
+  if (sessBlock) {
+    sessBlock.innerHTML = `<div class="ai-block-loading"><div class="spinner"></div> Анализ сессии целиком...</div>`;
+  }
+  try {
+    const r = await fetch('/api/session/summarize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sessionId}),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      if (sessBlock) sessBlock.innerHTML = `<div class="ai-block-error">❌ ${esc(data.error || 'Ошибка')}</div>`;
+      return;
+    }
+    S[`sessSum_${sessionId}`] = data;
+    // Re-render session block
+    const li = S.items.find(i => i.id === genId) || {};
+    const full = renderAiSection(genId, li);
+    const aiBlock = document.getElementById(`aiBlock_${genId}`);
+    if (aiBlock) aiBlock.outerHTML = full;
+  } catch(e) {
+    if (sessBlock) sessBlock.innerHTML = `<div class="ai-block-error">❌ ${esc(e.message)}</div>`;
+  }
 }
 
 // ─── END_BLOCK_AI_SUMMARIZE
