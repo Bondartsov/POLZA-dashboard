@@ -1315,10 +1315,8 @@ def _llm_call_anthropic(user_text: str):
 
 
 def _llm_call_ollama(user_text: str):
-    """Call Ollama (Qwen) via OpenAI-compatible API. Returns (parsed_dict, usage_info)."""
+    """Call Ollama (Qwen) via native /api/chat endpoint. Returns (parsed_dict, usage_info)."""
     system_prompt = GEN_SUMMARIZE_PROMPT
-    if not OLLAMA_THINKING:
-        system_prompt += "\n/no_think"
 
     payload = {
         "model": OLLAMA_CHAT_MODEL,
@@ -1326,10 +1324,11 @@ def _llm_call_ollama(user_text: str):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{user_text}"},
         ],
-        "temperature": 0.2,
         "stream": False,
+        "think": OLLAMA_THINKING,  # False = fast (~2-5s), True = deep thinking (~60s)
     }
-    chat_url = f"{OLLAMA_BASE_URL}/v1/chat/completions"
+    # Use native /api/chat for think parameter support (OpenAI-compatible lacks this)
+    chat_url = f"{OLLAMA_BASE_URL}/api/chat"
 
     r = http_requests.post(chat_url, json=payload, timeout=OLLAMA_TIMEOUT)
     if r.status_code != 200:
@@ -1337,20 +1336,19 @@ def _llm_call_ollama(user_text: str):
 
     data = r.json()
     content = ""
-    choices = data.get("choices", [])
-    if choices:
-        content = choices[0].get("message", {}).get("content", "")
+    msg = data.get("message", {})
+    if msg:
+        content = msg.get("content", "")
 
     if not content:
         raise ValueError("Ollama returned empty content")
 
     parsed = _parse_llm_json(content)
 
-    # Ollama usage info (approximate)
-    usage_data = data.get("usage", {}) or {}
+    # Ollama native API usage (prompt_eval_count / eval_count)
     usage_info = {
-        "input_tokens": usage_data.get("prompt_tokens", 0),
-        "output_tokens": usage_data.get("completion_tokens", 0),
+        "input_tokens": data.get("prompt_eval_count", 0) or 0,
+        "output_tokens": data.get("eval_count", 0) or 0,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "cost_usd": 0.0,
