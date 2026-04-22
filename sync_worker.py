@@ -123,7 +123,7 @@ def _enrich_session_metadata(dbs, gen_id, token):
 
 def sync_key(session, api_key):
     """Sync a single API key — fetch new records since last_sync_at.
-    Returns (new_count, error_string_or_None)."""
+    Returns (new_count, new_ids_list, error_string_or_None)."""
     since = api_key.last_sync_at
     if since:
         since = since - SYNC_BUFFER
@@ -131,6 +131,7 @@ def sync_key(session, api_key):
     page = 1
     total_new = 0
     all_ids = []
+    new_ids = []  # IDs of actually new (inserted) records
     while True:
         params = {"page": page, "limit": 100, "sortBy": "createdAt", "sortOrder": "desc"}
         if since:
@@ -146,15 +147,18 @@ def sync_key(session, api_key):
         except Exception as e:
             api_key.last_error = str(e)[:500]
             session.commit()
-            return total_new, str(e)
+            return total_new, [], str(e)
 
         items = data.get("items", [])
         if not items:
             break
 
         for item in items:
+            is_new = session.query(Generation).get(item["id"]) is None
             _upsert_generation(session, item, api_key.name)
             all_ids.append(item["id"])
+            if is_new:
+                new_ids.append(item["id"])
             total_new += 1
 
         session.commit()
@@ -185,29 +189,32 @@ def sync_key(session, api_key):
     api_key.total_synced = (api_key.total_synced or 0) + total_new
     api_key.last_error = None
     session.commit()
-    return total_new, None
+    return total_new, new_ids, None
 
 
 def sync_all_keys():
-    """Sync all registered API keys. Returns list of per-key results."""
+    """Sync all registered API keys. Returns (results_list, all_new_ids)."""
     session = get_session()
     try:
         keys = session.query(ApiKey).all()
         results = []
+        all_new_ids = []
         for key in keys:
-            new_count, error = sync_key(session, key)
+            new_count, new_ids, error = sync_key(session, key)
             results.append({
                 "name": key.name,
                 "new": new_count,
                 "status": "ok" if not error else "error",
                 "error": error,
             })
+            if new_ids:
+                all_new_ids.extend(new_ids)
             print(f"[Sync] {key.name}: +{new_count} new"
                   + (f" ({error})" if error else ""))
-        return results
+        return results, all_new_ids
     except Exception as e:
         print(f"[Sync] Fatal: {e}")
-        return [{"name": "fatal", "new": 0, "status": "error", "error": str(e)}]
+        return [{"name": "fatal", "new": 0, "status": "error", "error": str(e)}], []
     finally:
         session.close()
 
@@ -221,6 +228,7 @@ class SyncWorker(threading.Thread):
         self._sync_now = threading.Event()
         self.last_results = []
         self.last_time = None
+        self.on_new_records = None  # callback(new_ids) — called after each sync
 
     def run(self):
         # Initial sync on start
@@ -234,12 +242,18 @@ class SyncWorker(threading.Thread):
 
     def _do_sync(self):
         try:
-            results = sync_all_keys()
+            results, new_ids = sync_all_keys()
             self.last_results = results
             self.last_time = datetime.now(timezone.utc)
             total_new = sum(r["new"] for r in results if r["new"])
             if total_new:
                 print(f"[Sync] Total +{total_new} new records across {len(results)} keys")
+            # Auto-analyze callback
+            if new_ids and self.on_new_records:
+                try:
+                    self.on_new_records(new_ids)
+                except Exception as e:
+                    print(f"[Sync] auto-analyze callback error: {e}")
         except Exception as e:
             print(f"[Sync] Error: {e}")
 

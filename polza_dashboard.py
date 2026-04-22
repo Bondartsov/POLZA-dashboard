@@ -428,7 +428,7 @@ def api_trigger_sync():
 def api_sync_run():
     """Run sync synchronously — waits for all keys, returns results."""
     try:
-        results = sync_all_keys()
+        results, new_ids = sync_all_keys()
         total_new = sum(r["new"] for r in results)
         return jsonify({"results": results, "totalNew": total_new})
     except Exception as e:
@@ -1804,7 +1804,7 @@ def _analyze_all_worker():
         dbs = get_session()
         try:
             # Find all generation IDs without summary
-            all_gen_ids = dbs.query(Generation.id).order_by(Generation.created_at.desc()).all()
+            all_gen_ids = dbs.query(Generation.id).order_by(Generation.created_at_api.desc()).all()
             all_ids = [row[0] for row in all_gen_ids]
 
             # Filter out already-analyzed ones
@@ -1932,7 +1932,48 @@ def api_analyze_all_pause():
         state = "paused" if _analyze_all["paused"] else "resumed"
     print(f"[AnalyzeAll] {state}")
     return jsonify({"status": state})
-    return jsonify({"status": "stopping"})
+
+
+# ─── START_BLOCK_AUTO_ANALYZE
+# Auto-analyze: triggered by SyncWorker after each sync cycle
+
+def _auto_analyze_new_records(new_gen_ids):
+    """Callback for SyncWorker: auto-analyze newly synced records if toggle is ON.
+    Runs in sync worker thread — must not block long."""
+    if not new_gen_ids:
+        return
+    if not _provider_state.get("auto_analyze"):
+        return
+    # Don't start if analyze-all is already running
+    with _analyze_all["lock"]:
+        if _analyze_all["running"]:
+            print(f"[AutoAnalyze] skipped — analyze-all already running")
+            return
+
+    # Filter out already-analyzed
+    cached = gen_summary_get_many(new_gen_ids)
+    uncached = [gid for gid in new_gen_ids if gid not in cached]
+
+    if not uncached:
+        return
+
+    print(f"[AutoAnalyze] {len(uncached)} new records to auto-analyze (provider={_provider_state['provider']})")
+
+    for gen_id in uncached:
+        try:
+            result = _analyze_single_gen(gen_id)
+            if result["status"] == "ok":
+                print(f"[AutoAnalyze] ✅ {gen_id[:16]}")
+            else:
+                print(f"[AutoAnalyze] ⚠️ {gen_id[:16]}: {result.get('detail', result['status'])}")
+        except Exception as e:
+            print(f"[AutoAnalyze] ❌ {gen_id[:16]}: {e}")
+        # Be polite to APIs — small delay between calls
+        time.sleep(0.5)
+
+    print(f"[AutoAnalyze] batch done")
+
+# ─── END_BLOCK_AUTO_ANALYZE
 
 
 def _summarize_all_worker(employee: str):
@@ -2168,6 +2209,7 @@ def main():
 
     # Start background sync worker
     sync_worker = SyncWorker()
+    sync_worker.on_new_records = _auto_analyze_new_records
     sync_worker.start()
 
     session = get_session()
