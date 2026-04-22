@@ -2046,18 +2046,6 @@ def api_analyze_all_pause():
     return jsonify({"status": state_label})
 
 
-@app.route("/api/analyze-all/pause", methods=["POST"])
-def api_analyze_all_pause():
-    """Pause/resume analyze-all."""
-    with _analyze_all["lock"]:
-        if not _analyze_all["running"]:
-            return jsonify({"error": "not running"}), 400
-        _analyze_all["paused"] = not _analyze_all["paused"]
-        state = "paused" if _analyze_all["paused"] else "resumed"
-    print(f"[AnalyzeAll] {state}")
-    return jsonify({"status": state})
-
-
 # ─── START_BLOCK_AUTO_ANALYZE
 # Auto-analyze: triggered by SyncWorker after each sync cycle
 
