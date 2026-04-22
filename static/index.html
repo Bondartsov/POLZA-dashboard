@@ -48,6 +48,9 @@
         <input type="checkbox" id="autoAnalyzeSwitch" onchange="toggleAutoAnalyze()">
         <span>🤖 Авто-анализ новых</span>
       </label>
+      <div style="font-size:10px;color:var(--text2);margin-top:2px;padding-left:4px">
+        Sync с Polza.AI каждые 5 мин · анализ при включении
+      </div>
     </div>
     <div class="theme-toggle">
       <input type="checkbox" id="themeSwitch" onchange="toggleTheme()">
@@ -55,7 +58,14 @@
     </div>
     <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-bottom:6px">
       <input type="checkbox" id="setAutoRefresh" onchange="toggleAutoRefresh()" checked>
-      Автообновление (60 сек)
+      Автообновление
+      <select id="setRefreshInterval" onchange="applyRefreshInterval()" style="font-size:11px;padding:1px 4px;border-radius:3px">
+        <option value="10">10 сек</option>
+        <option value="30">30 сек</option>
+        <option value="60" selected>60 сек</option>
+        <option value="120">2 мин</option>
+        <option value="300">5 мин</option>
+      </select>
     </label>
     <label style="font-size:12px">Записей на странице
       <input type="number" id="setLimit" value="50" min="10" max="500" step="10" onchange="S.limit=+this.value;goPage(1)">

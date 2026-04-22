@@ -8,11 +8,12 @@ const S = {
   loading: false, allLoaded: false,
   groupMode: 'flat',
   keys: [], pastedKeys: [],
-  autoRefresh: true, refreshTimer: null, lastUpdate: null,
+  autoRefresh: true, refreshTimer: null, refreshInterval: 60000, lastUpdate: null,
   keyNames: new Set(),
   balance: null,
   provider: 'ollama',  // current AI provider: 'ollama' | 'anthropic'
   providerConfig: null, // full config from /api/provider/config
+  analyzeAllRunning: false, // true when analyze-all background worker is active
 };
 const KEY_COLORS = ['#6c7bf0','#4ade80','#f87171','#fbbf24','#60a5fa','#c084fc','#fb923c','#22d3ee','#f472b6','#a3e635','#f97316','#14b8a6'];
 const charts = {};
@@ -127,16 +128,25 @@ function startAutoRefresh() {
   if (S.refreshTimer) clearInterval(S.refreshTimer);
   S.refreshTimer = setInterval(() => {
     if (S.autoRefresh && !S.loading) loadPage(true);
-  }, 60000);
+  }, S.refreshInterval);
 }
 function toggleAutoRefresh() {
   S.autoRefresh = document.getElementById('setAutoRefresh').checked;
   if (S.autoRefresh) startAutoRefresh(); else if (S.refreshTimer) clearInterval(S.refreshTimer);
+  updateTimestamp();
+}
+function applyRefreshInterval() {
+  const val = parseInt(document.getElementById('setRefreshInterval').value, 10) * 1000;
+  S.refreshInterval = val;
+  if (S.autoRefresh) startAutoRefresh();
+  updateTimestamp();
 }
 function updateTimestamp() {
   S.lastUpdate = new Date();
   const el = document.getElementById('updateInfo');
-  el.innerHTML = `Обновлено: <span class="val">${S.lastUpdate.toLocaleTimeString('ru-RU')}</span>${S.autoRefresh ? ' · 🔄 60с' : ''}`;
+  const sec = S.refreshInterval / 1000;
+  const label = sec < 60 ? `${sec}с` : `${Math.round(sec/60)} мин`;
+  el.innerHTML = `Обновлено: <span class="val">${S.lastUpdate.toLocaleTimeString('ru-RU')}</span>${S.autoRefresh ? ` · 🔄 ${label}` : ''}`;
 }
 
 // ─── Sidebar ────────────────────────────────────────────────────────────────────
@@ -532,7 +542,12 @@ function renderRows(items) {
 // ─── START_BLOCK_CATEGORY_CELL
 function renderCategoryCell(it) {
   const sum = S[`summary_${it.id}`];
-  if (!sum) return '<span style="color:var(--text2)">—</span>';
+  if (!sum) {
+    // Mirror AI cell status: queued / waiting / not analyzed
+    if (S.analyzeAllRunning) return '<span style="color:var(--yellow);font-size:11px">🔄</span>';
+    if (S.providerConfig?.autoAnalyze) return '<span style="color:var(--blue);font-size:11px">⏳</span>';
+    return '<span style="color:var(--text2)">—</span>';
+  }
   const isWork = sum.isWork !== false;
   const flags = Array.isArray(sum.riskFlags) ? sum.riskFlags : [];
   // Main category badge
@@ -552,11 +567,20 @@ function renderCategoryCell(it) {
 // ─── END_BLOCK_CATEGORY_CELL
 
 // ─── START_BLOCK_AI_CELL
-// Minimal cell: topic (if analyzed) or grey 🧠 (not analyzed).
-// Clicking the row (not the cell) opens the detail modal — where AI analysis lives.
+// Status indicators:
+//   ✅ done (has summary) — green topic
+//   🔄 In queue (analyze-all running) — yellow
+//   ⏳ Waiting (auto-analyze ON, will process on next sync) — blue
+//   🧠 Not analyzed (nothing active) — grey
 function renderAiCell(it) {
   const sum = S[`summary_${it.id}`];
   if (!sum) {
+    if (S.analyzeAllRunning) {
+      return `<span class="ai-cell ai-cell-queued" title="В очереди на анализ">🔄 В очереди</span>`;
+    }
+    if (S.providerConfig?.autoAnalyze) {
+      return `<span class="ai-cell ai-cell-waiting" title="Авто-анализ включён — будет обработано">⏳ Ожидает</span>`;
+    }
     return `<span class="ai-cell ai-cell-empty" title="Не проанализировано — откройте детали">🧠</span>`;
   }
   const isPersonal = sum.isWork === false;
@@ -960,6 +984,7 @@ function stopAnalyzeAllPoll() {
 async function pollAnalyzeAllStatus() {
   try {
     const data = await (await fetch('/api/analyze-all/status')).json();
+    S.analyzeAllRunning = data.running;
     renderAnalyzeAllIndicator(data);
     const banner = document.getElementById('progressBanner');
     const processed = data.done + data.skipped + data.errors;
@@ -977,6 +1002,9 @@ async function pollAnalyzeAllStatus() {
       pt.innerHTML = `🧠 AI-анализ${pausedLabel}: <b>${data.done}</b>/${data.total} (${pct}%) · ${data.errors} ош. ${eta}
         <button class="btn btn-small" style="margin-left:8px;padding:2px 10px" onclick="toggleAnalyzeAllPause()">${data.paused ? '▶ Продолжить' : '⏸ Пауза'}</button>
         <button class="btn btn-small btn-danger" style="margin-left:4px;padding:2px 10px" onclick="stopAnalyzeAll()">⏹ Стоп</button>`;
+      // Refresh table to show updated status icons (queued → done as they complete)
+      if (data.done > 0) await prefetchSummaries();
+      renderTable();
     } else {
       hideProgress();
       if (data.done > 0 || data.skipped > 0) {
@@ -1043,6 +1071,7 @@ function renderAnalyzeAllIndicator(d) {
 async function checkAnalyzeAllStatus() {
   try {
     const data = await (await fetch('/api/analyze-all/status')).json();
+    S.analyzeAllRunning = data.running;
     if (data.running) startAnalyzeAllPoll();
   } catch(e) {}
 }
