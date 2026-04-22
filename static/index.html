@@ -44,6 +44,10 @@
           <span class="provider-info" id="providerAnthropicInfo">Haiku 4.5 · ~$0.002</span>
         </span>
       </label>
+      <label class="auto-analyze-toggle" style="margin-top:6px">
+        <input type="checkbox" id="autoAnalyzeSwitch" onchange="toggleAutoAnalyze()">
+        <span>🤖 Авто-анализ новых</span>
+      </label>
     </div>
     <div class="theme-toggle">
       <input type="checkbox" id="themeSwitch" onchange="toggleTheme()">
@@ -151,8 +155,8 @@
         <th data-sort="cacheWrite" data-type="client">Записано (кэш)</th>
         <th data-sort="generationTimeMs" data-type="client">Время</th>
         <th data-sort="apiKeyName" data-type="client">API Ключ</th>
-        <th>Категория</th>
-        <th>AI</th>
+        <th data-sort="category" data-type="client">Категория</th>
+        <th data-sort="aiTopic" data-type="client">AI</th>
       </tr></thead>
       <tbody id="tableBody"></tbody>
     </table>

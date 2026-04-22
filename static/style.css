@@ -84,6 +84,8 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .provider-icon{font-size:14px}
 .provider-info{font-size:10px;color:var(--text2);margin-left:auto}
 .provider-option input[type="radio"]:checked ~ .provider-label .provider-info{color:var(--accent)}
+.auto-analyze-toggle{display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer}
+.auto-analyze-toggle input[type="checkbox"]{accent-color:var(--accent);width:16px;height:16px;cursor:pointer}
 
 /* ─── Global Progress Banner (sticky under topbar) ─── */
 .progress-banner{position:sticky;top:49px;z-index:99;background:var(--bg2);border-bottom:1px solid var(--accent);padding:8px 20px}
@@ -188,6 +190,13 @@ tbody td{padding:6px 10px;vertical-align:middle;white-space:nowrap;max-width:260
 .detail-card .value{font-size:14px;font-weight:600}
 
 .section-title{font-size:13px;font-weight:600;color:var(--accent2);margin:16px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--border)}
+.log-section{margin:12px 0;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.log-section-toggle{cursor:pointer;font-size:13px;font-weight:600;color:var(--accent2);padding:10px 14px;background:var(--bg3);user-select:none;list-style:none}
+.log-section-toggle::-webkit-details-marker{display:none}
+.log-section-toggle::before{content:'▶ ';font-size:10px;transition:transform .15s}
+.log-section[open] .log-section-toggle::before{content:'▼ '}
+.log-section-toggle:hover{background:var(--bg4)}
+.log-section > *:not(summary){padding:0 14px 14px}
 
 .usage-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px}
 .usage-item{background:var(--bg3);border-radius:7px;padding:8px 10px;text-align:center}

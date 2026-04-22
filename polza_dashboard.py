@@ -62,7 +62,7 @@ QDRANT_COLLECTION = "Polza_user_logs"
 QDRANT_ENABLED = True  # set False to disable vector storage
 
 # Runtime provider state (in-memory, can be switched via API)
-_provider_state = {"provider": "ollama"}  # default, overridden by .env then API
+_provider_state = {"provider": "ollama", "auto_analyze": False}  # default, overridden by .env then API
 
 
 # ─── .env loader ─────────────────────────────────────────────────────────────────
@@ -206,6 +206,7 @@ def api_provider_config():
     provider = _provider_state["provider"]
     config = {
         "provider": provider,
+        "autoAnalyze": _provider_state["auto_analyze"],
         "ollama": {
             "baseUrl": OLLAMA_BASE_URL,
             "chatModel": OLLAMA_CHAT_MODEL,
@@ -230,14 +231,18 @@ def api_provider_config():
 
 @app.route("/api/provider/set", methods=["POST"])
 def api_provider_set():
-    """Switch LLM provider at runtime. Body: {provider: "ollama"|"anthropic"}."""
+    """Switch LLM provider at runtime. Body: {provider: "ollama"|"anthropic", autoAnalyze?: bool}."""
     data = request.get_json(silent=True) or {}
     provider = data.get("provider", "")
-    if provider not in ("ollama", "anthropic"):
+    if provider and provider not in ("ollama", "anthropic"):
         return jsonify({"error": "provider must be 'ollama' or 'anthropic'"}), 400
-    _provider_state["provider"] = provider
-    print(f"[Provider] switched to {provider}")
-    return jsonify({"ok": True, "provider": provider})
+    if provider:
+        _provider_state["provider"] = provider
+        print(f"[Provider] switched to {provider}")
+    if "autoAnalyze" in data:
+        _provider_state["auto_analyze"] = bool(data["autoAnalyze"])
+        print(f"[Provider] auto_analyze={_provider_state['auto_analyze']}")
+    return jsonify({"ok": True, "provider": _provider_state["provider"], "autoAnalyze": _provider_state["auto_analyze"]})
 
 
 # ─── Routes: DB-backed generations ────────────────────────────────────────────────
@@ -1689,6 +1694,7 @@ def api_generation_summary_delete():
 
 _analyze_all = {
     "running": False,
+    "paused": False,
     "total": 0,
     "done": 0,
     "errors": 0,
@@ -1828,6 +1834,14 @@ def _analyze_all_worker():
                         _analyze_all["running"] = False
                         print("[AnalyzeAll] stopped mid-batch")
                         return
+                    # Pause support: wait while paused
+                    while _analyze_all["paused"] and not _analyze_all["stop_requested"]:
+                        _analyze_all["lock"].release()
+                        time.sleep(0.5)
+                        _analyze_all["lock"].acquire()
+                    if _analyze_all["stop_requested"]:
+                        _analyze_all["running"] = False
+                        return
 
                 result = _analyze_single_gen(gen_id)
 
@@ -1865,6 +1879,7 @@ def api_analyze_all_start():
         if _analyze_all["running"]:
             return jsonify({"status": "already_running"})
         _analyze_all["running"] = True
+        _analyze_all["paused"] = False
         _analyze_all["done"] = 0
         _analyze_all["skipped"] = 0
         _analyze_all["total"] = 0
@@ -1888,6 +1903,7 @@ def api_analyze_all_status():
     with _analyze_all["lock"]:
         return jsonify({
             "running": _analyze_all["running"],
+            "paused": _analyze_all["paused"],
             "done": _analyze_all["done"],
             "skipped": _analyze_all["skipped"],
             "total": _analyze_all["total"],
@@ -1902,6 +1918,20 @@ def api_analyze_all_stop():
     """Request analyze-all to stop."""
     with _analyze_all["lock"]:
         _analyze_all["stop_requested"] = True
+        _analyze_all["paused"] = False  # unpause so it can see stop flag
+    return jsonify({"status": "stopping"})
+
+
+@app.route("/api/analyze-all/pause", methods=["POST"])
+def api_analyze_all_pause():
+    """Pause/resume analyze-all."""
+    with _analyze_all["lock"]:
+        if not _analyze_all["running"]:
+            return jsonify({"error": "not running"}), 400
+        _analyze_all["paused"] = not _analyze_all["paused"]
+        state = "paused" if _analyze_all["paused"] else "resumed"
+    print(f"[AnalyzeAll] {state}")
+    return jsonify({"status": state})
     return jsonify({"status": "stopping"})
 
 
@@ -2069,6 +2099,8 @@ def main():
 
     # Set runtime provider from env
     _provider_state["provider"] = LLM_PROVIDER
+    auto_analyze_env = os.environ.get("AUTO_ANALYZE", "false").lower() in ("true", "1", "yes")
+    _provider_state["auto_analyze"] = auto_analyze_env
 
     provider_icon = "🏠 On-Prem" if LLM_PROVIDER == "ollama" else "☁️ Cloud"
     print(f"🧠 LLM provider: {provider_icon} ({LLM_PROVIDER})")

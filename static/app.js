@@ -169,6 +169,9 @@ async function loadProviderConfig() {
       const ai = document.getElementById('providerAnthropicInfo');
       if (ai) ai.textContent = `${cfg.anthropic.model} · ~$0.002`;
     }
+    // Auto-analyze checkbox
+    const aa = document.getElementById('autoAnalyzeSwitch');
+    if (aa) aa.checked = cfg.autoAnalyze === true;
   } catch(e) { console.warn('provider config load failed:', e); }
 }
 
@@ -181,10 +184,22 @@ async function setProvider(provider) {
     });
     if (!r.ok) return;
     S.provider = provider;
-    // Update config for UI labels
     if (S.providerConfig) S.providerConfig.provider = provider;
-    console.log('Provider switched to:', provider);
   } catch(e) { console.warn('provider switch failed:', e); }
+}
+
+async function toggleAutoAnalyze() {
+  const checked = document.getElementById('autoAnalyzeSwitch').checked;
+  try {
+    const r = await fetch('/api/provider/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({autoAnalyze: checked}),
+    });
+    if (!r.ok) return;
+    if (S.providerConfig) S.providerConfig.autoAnalyze = checked;
+    console.log('Auto-analyze:', checked);
+  } catch(e) { console.warn('auto-analyze toggle failed:', e); }
 }
 
 function getProviderLabel() {
@@ -334,10 +349,25 @@ function sortItems() {
       case 'requestType': va = a.requestType||''; vb = b.requestType||''; break;
       case 'status': va = a.status||''; vb = b.status||''; break;
       case 'cost': va = parseFloat(a.cost)||0; vb = parseFloat(b.cost)||0; break;
+      case 'category':
+        // Sort: personal first, then flagged, then work, then empty
+        va = _categorySortKey(a); vb = _categorySortKey(b); break;
+      case 'aiTopic':
+        va = (S[`summary_${a.id}`]?.topic||'').toLowerCase();
+        vb = (S[`summary_${b.id}`]?.topic||'').toLowerCase(); break;
       default: va = a.createdAt||''; vb = b.createdAt||'';
     }
     if (va < vb) return -1 * dir; if (va > vb) return 1 * dir; return 0;
   });
+}
+
+function _categorySortKey(it) {
+  const sum = S[`summary_${it.id}`];
+  if (!sum) return 'zzz';
+  if (sum.isWork === false) return '1';  // personal first
+  const flags = Array.isArray(sum.riskFlags) ? sum.riskFlags : [];
+  if (flags.length > 0) return '2';  // flagged
+  return '3';  // work
 }
 
 function filterItems() {
@@ -748,15 +778,15 @@ async function openDetail(genId) {
 
     if (log) {
       const req = log.request||{}, msgs = req.messages||[];
-      h += `<div class="section-title">📤 Запрос (${msgs.length} сообщений)</div>`;
-      h += `<div style="font-size:11px;color:var(--text2);margin-bottom:6px">Модель: ${req.model||'—'} · Stream: ${req.stream?'Да':'Нет'}</div>`;
+      h += `<details class="log-section"><summary class="log-section-toggle">📤 Запрос (${msgs.length} сообщений) · Модель: ${req.model||'—'} · Stream: ${req.stream?'Да':'Нет'}</summary>`;
       if (req.tools?.length) {
         h += `<details style="margin-bottom:8px"><summary style="cursor:pointer;color:var(--accent2);font-size:12px">🔧 Tools (${req.tools.length})</summary><div style="margin-top:4px">`;
         req.tools.forEach(t => { h += `<div class="tool-call"><span class="fn-name">${t.function?.name||'?'}</span> <span style="color:var(--text2);font-size:11px">${(t.function?.description||'').slice(0,80)}</span></div>`; });
         h += '</div></details>';
       }
       h += renderMessages(msgs);
-      h += '<div class="section-title">📥 Ответ</div>';
+      h += '</details>';
+      h += `<details class="log-section"><summary class="log-section-toggle">📥 Ответ</summary>`;
       const resp = log.response||{}, choices = resp.choices||[];
       choices.forEach((ch,ci) => {
         const msg = ch.message||{};
@@ -764,6 +794,7 @@ async function openDetail(genId) {
         if (msg.tool_calls?.length) msg.tool_calls.forEach(tc => { h += `<div class="tool-call"><div class="fn-name">🔧 ${tc.function?.name||tc.type||'?'}</div><pre>${tryJSON(tc.function?.arguments)}</pre></div>`; });
         if (msg.content) h += `<div class="msg msg-assistant"><div class="msg-header" onclick="toggleMsg(this)"><span class="role">ASSISTANT</span>${msg.content.length} chars<span class="toggle">▼</span></div><div class="msg-body">${esc(msg.content)}</div></div>`;
       });
+      h += '</details>';
     } else h += '<div style="padding:16px;color:var(--text2);text-align:center">Лог недоступен</div>';
     body.innerHTML = h;
   } catch(e) { body.innerHTML = `<div style="padding:16px;color:var(--red)">❌ ${e.message}</div>`; }
@@ -918,7 +949,7 @@ async function startAnalyzeAll() {
 
 function startAnalyzeAllPoll() {
   if (_analyzeAllPollTimer) return;
-  _analyzeAllPollTimer = setInterval(pollAnalyzeAllStatus, 2000);
+  _analyzeAllPollTimer = setInterval(pollAnalyzeAllStatus, 1500);
   pollAnalyzeAllStatus();
 }
 
@@ -930,27 +961,56 @@ async function pollAnalyzeAllStatus() {
   try {
     const data = await (await fetch('/api/analyze-all/status')).json();
     renderAnalyzeAllIndicator(data);
-    const btn = document.getElementById('btnAnalyzeAll');
+    const banner = document.getElementById('progressBanner');
+    const processed = data.done + data.skipped + data.errors;
+    const pct = data.total > 0 ? Math.round(processed / data.total * 100) : 0;
+
     if (data.running) {
-      const pct = data.total > 0 ? Math.round((data.done + data.skipped + data.errors) / data.total * 100) : 0;
-      btn.textContent = `⏳ Остановить (${data.done}/${data.total})`;
-      btn.onclick = async () => { await fetch('/api/analyze-all/stop', { method: 'POST' }); };
-      showProgress(`🧠 AI-анализ: ${data.done} готово / ${data.total} всего (${data.errors} ошибок)`, pct);
+      const pausedLabel = data.paused ? ' ⏸ ПАУЗА' : '';
+      const eta = data.done > 0 && !data.paused ? _estimateEta(data) : '';
+      showProgress(
+        `🧠 AI-анализ${pausedLabel}: ${data.done} готово / ${data.total} всего (${data.errors} ош.) ${eta}`,
+        pct
+      );
+      // Update banner with pause/resume and stop buttons
+      const pt = document.getElementById('progressText');
+      pt.innerHTML = `🧠 AI-анализ${pausedLabel}: <b>${data.done}</b>/${data.total} (${pct}%) · ${data.errors} ош. ${eta}
+        <button class="btn btn-small" style="margin-left:8px;padding:2px 10px" onclick="toggleAnalyzeAllPause()">${data.paused ? '▶ Продолжить' : '⏸ Пауза'}</button>
+        <button class="btn btn-small btn-danger" style="margin-left:4px;padding:2px 10px" onclick="stopAnalyzeAll()">⏹ Стоп</button>`;
     } else {
-      btn.textContent = '🧠 Анализ всех';
-      btn.onclick = startAnalyzeAll;
-      btn.disabled = false;
       hideProgress();
       if (data.done > 0 || data.skipped > 0) {
-        // Final refresh
         stopAnalyzeAllPoll();
         await prefetchSummaries();
         renderTable();
+        // Show completion toast for 5 seconds
+        showProgress(`✅ AI-анализ завершён: ${data.done} проанализировано, ${data.skipped} пропущено, ${data.errors} ошибок`, 100);
+        setTimeout(hideProgress, 5000);
       } else {
         stopAnalyzeAllPoll();
       }
     }
   } catch(e) { /* ignore */ }
+}
+
+function _estimateEta(d) {
+  if (!d.startedAt || d.done < 1) return '';
+  const start = new Date(d.startedAt).getTime();
+  const now = d.lastUpdate ? new Date(d.lastUpdate).getTime() : Date.now();
+  const elapsed = (now - start) / 1000; // seconds
+  const perItem = elapsed / d.done;
+  const remaining = (d.total - d.done - d.skipped - d.errors) * perItem;
+  if (remaining < 60) return `~${Math.round(remaining)}с осталось`;
+  if (remaining < 3600) return `~${Math.round(remaining / 60)} мин осталось`;
+  return `~${(remaining / 3600).toFixed(1)}ч осталось`;
+}
+
+async function toggleAnalyzeAllPause() {
+  await fetch('/api/analyze-all/pause', { method: 'POST' });
+}
+
+async function stopAnalyzeAll() {
+  await fetch('/api/analyze-all/stop', { method: 'POST' });
 }
 
 function renderAnalyzeAllIndicator(d) {
@@ -969,8 +1029,8 @@ function renderAnalyzeAllIndicator(d) {
   const pct = d.total > 0 ? Math.round(processed / d.total * 100) : 0;
 
   if (d.running) {
-    icon.textContent = '⏳';
-    text.textContent = `🧠 ${d.done}/${d.total} (${pct}%)`;
+    icon.textContent = d.paused ? '⏸' : '⏳';
+    text.textContent = `🧠 ${d.done}/${d.total} (${pct}%)${d.paused ? ' ПАУЗА' : ''}`;
     time.textContent = d.lastUpdate ? fmtDate(d.lastUpdate) : '';
   } else {
     icon.textContent = '✅';
