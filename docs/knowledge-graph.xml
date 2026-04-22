@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 3.3.0 -->
+<!-- VERSION: 3.4.0 -->
 <!-- CHANGELOG:
+       3.4.0 (2026-04-22): Added Phase-4 "Qwen On-Prem + Vector Embeddings".
+                           New modules: M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT, M-PROVIDER-UI.
+                           Updated M-LLM-GEN-SUMMARIZE for parallel LLM+embed and dual store.
+                           Updated M-APP with provider config/set endpoints and new env vars.
+                           Updated M-STATIC with provider toggle and vector badge.
        3.3.0 (2026-04-21): Added M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-ANTHROPIC.
                            Deprecated M-EMPLOYEE-REPORT/M-EMPLOYEE-UI (endpoints remain but UI
                            removed in simplify-ui refactor). Updated M-STATIC for per-generation
@@ -11,12 +16,12 @@
        3.1.0: Session summaries, 95-chunk SocratiCode index.
 -->
 
-<KnowledgeGraph project="polza-dashboard" version="3.3.0">
+<KnowledgeGraph project="polza-dashboard" version="3.4.0">
 
   <M-APP NAME="Flask App" TYPE="ENTRY_POINT">
     <purpose>Flask web-server v3: DB-backed API + proxy for detail/log + background backfill + per-generation AI summarize</purpose>
     <path>polza_dashboard.py</path>
-    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-ANOMALY, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-ANTHROPIC</depends>
+    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-ANOMALY, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-ANTHROPIC, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT</depends>
     <annotations>
       <fn-index PURPOSE="Serve index.html" />
       <fn-config PURPOSE="Auth config + keys from DB + sync status" />
@@ -33,6 +38,8 @@
       <fn-gen_summaries_batch PURPOSE="POST /api/generation-summaries — batch prefetch cached summaries by ID list" />
       <fn-gen_summary_delete PURPOSE="DELETE /api/generation/summary — drop cache, force regeneration" />
       <fn-session_summarize PURPOSE="POST /api/session/summarize — session-level summary (only when session_id exists)" />
+      <fn-provider_config PURPOSE="GET /api/provider/config — returns current provider, available providers with model/cost info" />
+      <fn-provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama}. Switches _provider_state at runtime" />
     </annotations>
   </M-APP>
 
@@ -105,6 +112,8 @@
       <fn-group_items PURPOSE="Grouping: flat, day, model, key, topic (AI-topic semantic grouping); unanalyzed rows go to '🤖 Без AI-анализа' bucket" />
       <fn-charts PURPOSE="Chart.js analytics: timeline, models, cache, keys" />
       <fn-sidebar PURPOSE="Overlay sidebar with key paste" />
+      <fn-load_provider_config PURPOSE="GET /api/provider/config on page load — populate radio state and provider info labels" />
+      <fn-set_provider PURPOSE="POST /api/provider/set on radio click — switch runtime LLM provider, update UI" />
       <fn-detail PURPOSE="Modal with full log — backend resolves token. Now embeds M-LLM-GEN-SUMMARIZE results on top." />
       <fn-autorefresh PURPOSE="Auto-refresh every 60s — reads from DB (fast)" />
       <fn-backfill_ui PURPOSE="Topbar indicator: ⏳/✅/❌ status, polling every 2s, start/stop/retry buttons" />
@@ -163,18 +172,20 @@
   <M-LLM-GEN-SUMMARIZE NAME="Generation Summarizer" TYPE="CORE_LOGIC">
     <purpose>Per-generation LLM analysis. Checks DB cache first; on miss, fetches Polza log, extracts user text, calls Anthropic, stores result. Manual trigger only (user clicks button in detail modal).</purpose>
     <path>polza_dashboard.py</path>
-    <depends>M-DB, M-GEN-SUMMARY-STORE, M-LLM-ANTHROPIC</depends>
+    <depends>M-DB, M-GEN-SUMMARY-STORE, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT</depends>
     <annotations>
       <fn-api_generation_summarize PURPOSE="POST /api/generation/summarize — body: {generationId, force?}. Returns cached result or fresh LLM output." />
       <fn-api_generation_summaries_batch PURPOSE="POST /api/generation-summaries — body: {ids: [...]}. Bulk prefetch for table render. Cap 500 ids." />
       <fn-api_generation_summary_delete PURPOSE="DELETE /api/generation/summary?generationId=... — drop from cache, forces regeneration on next call." />
-      <fn-llm_call_summarize PURPOSE="Helper: builds Anthropic payload with cache_control, calls API, parses JSON from response content, computes cost. Raises on HTTP non-200 or empty content." />
+      <fn-llm_call_summarize PURPOSE="Helper: dispatches to _llm_call_anthropic or _llm_call_ollama based on _provider_state, parses JSON, computes cost. Raises on HTTP non-200 or empty content." />
       <fn-extract_user_text_from_log PURPOSE="Helper: concatenate user-role messages from Polza log (fallback to any-role content if empty), cap at 4000 chars." />
       <prompt-GEN_SUMMARIZE_PROMPT PURPOSE="Extended prompt — requests 3-5 sentence detailed summary with action, context, technologies, goal. Strict JSON output schema." />
       <block-marker>START_BLOCK_GEN_SUMMARIZE_PROMPT / START_BLOCK_GEN_SUMMARIZE_HELPERS / START_BLOCK_GEN_CACHE_CHECK / START_BLOCK_GEN_CALL_LLM / START_BLOCK_GEN_CACHE_STORE</block-marker>
       <log-prefix>[GenSummarize]</log-prefix>
       <output-schema>{generationId, summary, topic, isWork, projectGuess, riskFlags[], llmModel, llmCost, cacheCreationTokens, cacheReadTokens, inputTokens, outputTokens, cached}</output-schema>
-      <cost-per-call>~$0.002 (first call). Repeat calls: $0 (DB cache hit).</cost-per-call>
+      <cost-per-call>Anthropic: ~$0.002 (first call). Ollama: free. Repeat calls: $0 (DB cache hit).</cost-per-call>
+      <phase4-parallel>ThreadPoolExecutor runs LLM call + _embed_text() in parallel. Both must complete before storage.</phase4-parallel>
+      <phase4-dual-store>Result stored in both PostgreSQL (generation_summaries) and Qdrant (Polza_user_logs) with vector + payload.</phase4-dual-store>
     </annotations>
   </M-LLM-GEN-SUMMARIZE>
 
@@ -218,6 +229,72 @@
     </annotations>
   </M-EMPLOYEE-REPORT>
 
+  <M-LLM-PROVIDER NAME="Dual LLM Provider" TYPE="INTEGRATION">
+    <purpose>Abstract LLM calls to support both Anthropic (Cloud) and Ollama (On-Prem). Runtime provider switching via _provider_state. Includes robust JSON parser for Qwen output.</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-APP</depends>
+    <annotations>
+      <fn-_llm_call_anthropic PURPOSE="Refactored Anthropic native Messages API call — original _llm_call_summarize logic" />
+      <fn-_llm_call_ollama PURPOSE="New Ollama native /api/chat endpoint with think:false — 2-5s response for Qwen models" />
+      <fn-_llm_call_summarize PURPOSE="Dispatcher: reads _provider_state, routes to _llm_call_anthropic or _llm_call_ollama" />
+      <fn-_parse_llm_json PURPOSE="Robust JSON extraction — strips &lt;think&gt; tags, markdown fences, extracts first valid JSON object" />
+      <fn-api_provider_config PURPOSE="GET /api/provider/config — returns {provider, providers: [{id, name, model, cost_info}]}" />
+      <fn-api_provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama}. Updates _provider_state dict at runtime." />
+      <config-_provider_state PURPOSE="Runtime dict: {provider: str}. Defaults to LLM_PROVIDER env var. Switchable via API." />
+      <config-OLLAMA_BASE_URL PURPOSE="Ollama server URL, default http://localhost:11434" />
+      <config-OLLAMA_CHAT_MODEL PURPOSE="Ollama chat model, default qwen3.5:4b" />
+      <config-OLLAMA_EMBED_MODEL PURPOSE="Ollama embedding model, default nomic-embed-text-v2-moe:latest" />
+      <config-OLLAMA_THINKING PURPOSE="Enable/disable thinking mode, default false" />
+      <config-OLLAMA_TIMEOUT PURPOSE="Ollama request timeout in seconds, default 120" />
+      <discovery-think_parameter>Ollama native /api/chat with {"think": false} gives 2-5s response. OpenAI-compatible /v1/chat/completions does NOT support think parameter. /no_think in prompt text doesn't work — must use API parameter.</discovery-think_parameter>
+      <log-prefix>[Provider]</log-prefix>
+    </annotations>
+  </M-LLM-PROVIDER>
+
+  <M-EMBEDDING NAME="Embedding Pipeline" TYPE="INTEGRATION">
+    <purpose>Generate 768-dim vector embeddings via Ollama nomic-embed-text-v2-moe model. Runs in parallel with LLM call via ThreadPoolExecutor.</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-APP</depends>
+    <annotations>
+      <fn-_embed_text PURPOSE="Call Ollama /api/embed with model=nomic-embed-text-v2-moe:latest, return 768-dim float vector" />
+      <config-OLLAMA_EMBED_MODEL PURPOSE="Embedding model name from .env, default nomic-embed-text-v2-moe:latest" />
+      <model-dim>768 dimensions, cosine similarity</model-dim>
+      <parallel-execution>Submitted as ThreadPoolExecutor future alongside LLM call — zero additional latency on summarize path</parallel-execution>
+      <log-prefix>[Embedding]</log-prefix>
+    </annotations>
+  </M-EMBEDDING>
+
+  <M-QDRANT NAME="Qdrant Client Wrapper" TYPE="DATA_LAYER">
+    <purpose>Qdrant vector DB integration for storing generation embeddings with metadata. Separate container polza-qdrant on port 6335.</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-EMBEDDING</depends>
+    <annotations>
+      <fn-_get_qdrant_client PURPOSE="Lazy init Qdrant client — returns None if qdrant_client not installed or QDRANT_ENABLED=false. No crash on missing dependency." />
+      <fn-_qdrant_ensure_collection PURPOSE="Create Polza_user_logs collection (768-dim, cosine) if not exists. Called on first upsert." />
+      <fn-_qdrant_upsert PURPOSE="Store vector + payload for generation_id. Payload: {generation_id, topic, session_id, key_name, model, created_at}" />
+      <config-QDRANT_URL PURPOSE="Qdrant server URL, default http://localhost:6335" />
+      <config-QDRANT_COLLECTION PURPOSE="Collection name, default Polza_user_logs" />
+      <config-QDRANT_ENABLED PURPOSE="Enable/disable Qdrant storage, default true" />
+      <container>polza-qdrant on VM port 6335 (separate from socraticode-qdrant)</container>
+      <collection-spec>768 dimensions, cosine similarity, named Polza_user_logs</collection-spec>
+      <log-prefix>[Qdrant]</log-prefix>
+    </annotations>
+  </M-QDRANT>
+
+  <M-PROVIDER-UI NAME="Provider Toggle UI" TYPE="UI_COMPONENT">
+    <purpose>Sidebar radio buttons for runtime LLM provider switching with model/cost info display and AI section provider badges.</purpose>
+    <path>static/app.js</path>
+    <depends>M-STATIC</depends>
+    <annotations>
+      <fn-loadProviderConfig PURPOSE="GET /api/provider/config on page load — populate radio state and provider info labels" />
+      <fn-setProvider PURPOSE="POST /api/provider/set on radio click — switch provider, update UI labels and badge" />
+      <ui-radio PURPOSE="Radio buttons: 🏠 On-Prem (Qwen) — free, ~2-5s / ☁️ Cloud (Haiku) — ~$0.002, ~3s" />
+      <ui-provider_badge PURPOSE="AI section shows provider label (🏠/☁️) next to analysis result" />
+      <ui-vector_badge PURPOSE="🔵 Embedded indicator when vector stored in Qdrant" />
+      <css-classes>provider-toggle, provider-option, provider-info, provider-badge, vector-badge</css-classes>
+    </annotations>
+  </M-PROVIDER-UI>
+
   <Constraints>
     <constraint-sort>Polza.AI API supports only sortBy=createdAt|clientCost; DB supports all columns</constraint-sort>
     <constraint-cache>cached_tokens in prompt_tokens_details = cache READ (hit); prompt_tokens - cached = cache WRITE (miss)</constraint-cache>
@@ -233,6 +310,10 @@
     <constraint-llm_cache_first>/api/generation/summarize ALWAYS checks DB cache first unless force=true. No silent recomputation.</constraint-llm_cache_first>
     <constraint-session_coverage>Only ~25% of generations have session_id (sparse Polza.AI metadata). Session-level features must gracefully degrade when session_id is absent; semantic topic grouping is the fallback for aggregated views.</constraint-session_coverage>
     <constraint-prompt_cache_min>Anthropic prompt caching requires ≥2048 tokens for Haiku 4.5. Current system prompts are smaller, so cache_creation_input_tokens=0 is expected — DB cache provides the economy instead.</constraint-prompt_cache_min>
+    <constraint-ollama_native_api>Ollama native /api/chat with think:false gives 2-5s. OpenAI-compatible /v1/chat/completions does NOT support think. Must use native API.</constraint-ollama_native_api>
+    <constraint-qdrant_separate>polza-qdrant container on port 6335 is separate from socraticode-qdrant. Collection: Polza_user_logs, 768-dim cosine.</constraint-qdrant_separate>
+    <constraint-embedding_parallel>_embed_text runs in ThreadPoolExecutor parallel with LLM call. Embedding failure is non-fatal — PostgreSQL storage succeeds independently.</constraint-embedding_parallel>
+    <constraint-provider_runtime>Provider switch via POST /api/provider/set takes effect immediately on next _llm_call_summarize. No server restart needed.</constraint-provider_runtime>
   </Constraints>
 
 </KnowledgeGraph>

@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<DevelopmentPlan VERSION="0.3.0">
+<DevelopmentPlan VERSION="0.4.0">
   <!-- CHANGELOG:
+         0.4.0 (2026-04-22): Added Phase-4 "Qwen On-Prem + Vector Embeddings".
+                             New modules: M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT, M-PROVIDER-UI.
+                             Updated modules: M-LLM-GEN-SUMMARIZE (parallel LLM+embed), M-APP (provider endpoints),
+                             M-STATIC (provider toggle sidebar). New DataFlows: DF-008, DF-009.
+                             New infrastructure: Qdrant container on port 6335, nomic-embed-text-v2-moe embeddings.
          0.3.0 (2026-04-21): Added Phase-3 "AI per-generation analysis + UX refactor".
                              Marked M-EMPLOYEE-UI as removed from active UI (tab dropped in
                              simplify-ui refactor); M-EMPLOYEE-REPORT endpoints kept but unused.
@@ -15,6 +20,8 @@
     <risk-2>LLM может некорректно классифицировать рабочее/личное — prompt явно требует is_work + risk_flags; human review через модалку.</risk-2>
     <risk-3>Только 25% генераций имеют session_id (sparse Polza.AI metadata). Session-level features — graceful fallback: sub-блок в модалке только при наличии session_id.</risk-3>
     <risk-4>Anthropic prompt-caching имеет минимум 2048 токенов для Haiku 4.5; текущие system-промпты короче — кеш молча не применяется. Экономия обеспечивается persistent DB-кешем вместо prompt-cache.</risk-4>
+    <arch-dual-provider>Phase-4 introduces dual LLM provider: Anthropic (Cloud) via native Messages API vs Ollama (On-Prem) via native /api/chat. Runtime switching via _provider_state. Ollama native API with think:false gives 2-5s response; OpenAI-compatible /v1/chat/completions does NOT support think parameter. /no_think in prompt doesn't work — must use the API parameter.</arch-dual-provider>
+    <arch-vector-storage>Phase-4 adds Qdrant vector DB (separate container polza-qdrant on port 6335). Every summarize call now runs LLM + embedding in PARALLEL via ThreadPoolExecutor. Vectors are 768-dim cosine (nomic-embed-text-v2-moe). Payload includes generation_id, topic, session_id, key_name, model, created_at. Enables future semantic search across all analyzed generations.</arch-vector-storage>
   </ArchitectureNotes>
 
   <Modules>
@@ -32,7 +39,7 @@
         <fn-config PURPOSE="Auth config + keys + sync status" />
         <fn-health PURPOSE="DB health check" />
       </interface>
-      <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE</depends>
+      <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-PROVIDER</depends>
       <target>
         <source>polza_dashboard.py</source>
       </target>
@@ -264,7 +271,7 @@
         <fn-api_generation_summary_delete PURPOSE="DELETE /api/generation/summary — drop cache entry" />
         <fn-extract_user_text_from_log PURPOSE="Helper: concatenate user-role messages (fallback any-role), cap 4000 chars" />
       </interface>
-      <depends>M-DB, M-GEN-SUMMARY-STORE, M-LLM-ANTHROPIC</depends>
+      <depends>M-DB, M-GEN-SUMMARY-STORE, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT</depends>
       <target>
         <source>polza_dashboard.py</source>
       </target>
@@ -278,9 +285,119 @@
       <notes>
         <note-1>Strict JSON-output prompt asks for 3-5 sentence detailed summary with action, context, technologies, goal. Schema: summary, topic, is_work, project_guess, risk_flags[].</note-1>
         <note-2>risk_flags values: personal, off_hours, unusual_model, high_cost, sensitive.</note-2>
-        <note-3>Cost ~$0.002 per first call. Repeat calls from DB cache are $0 and ~5-10ms response.</note-3>
+        <note-3>Cost ~$0.002 per first call (Anthropic). Repeat calls from DB cache are $0 and ~5-10ms response.</note-3>
+        <note-4>Phase-4: Now runs LLM call + embedding in PARALLEL via ThreadPoolExecutor. Stores result in both PostgreSQL (generation_summaries) and Qdrant (Polza_user_logs).</note-4>
       </notes>
     </M-LLM-GEN-SUMMARIZE>
+
+    <!-- ═══ PHASE-4 MODULES (done — Qwen On-Prem + Vector Embeddings) ═══ -->
+
+    <M-LLM-PROVIDER NAME="Dual LLM Provider" TYPE="INTEGRATION" LAYER="1" ORDER="4" STATUS="done">
+      <contract>
+        <purpose>Abstract LLM calls to support both Anthropic (Cloud) and Ollama (On-Prem). Runtime provider switching via _provider_state.</purpose>
+        <scope>Provider dispatch, Anthropic native call, Ollama native /api/chat call, JSON parsing for Qwen output</scope>
+        <inputs>system_prompt, user_messages, provider selection (anthropic|ollama)</inputs>
+        <outputs>parsed LLM JSON, usage dict</outputs>
+        <errors>
+          <error code="PROVIDER_UNAVAILABLE">Selected provider fails to connect — fallback info in response</error>
+          <error code="JSON_PARSE_QWEN">Qwen returns non-JSON or wraps in thinking tags — _parse_llm_json extracts JSON robustly</error>
+        </errors>
+      </contract>
+      <interface>
+        <fn-_llm_call_anthropic PURPOSE="Refactored Anthropic native Messages API call — original _llm_call_summarize code" />
+        <fn-_llm_call_ollama PURPOSE="New Ollama native /api/chat with think:false parameter — 2-5s response" />
+        <fn-_llm_call_summarize PURPOSE="Dispatcher: selects provider based on _provider_state, calls appropriate handler" />
+        <fn-_parse_llm_json PURPOSE="Robust JSON extraction from Qwen output — handles &lt;think&gt; tags, markdown wrapping, partial JSON" />
+        <fn-api_provider_config PURPOSE="GET /api/provider/config — returns current provider, available providers, model info" />
+        <fn-api_provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama}. Switches _provider_state at runtime" />
+      </interface>
+      <depends>M-APP</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <observability>
+        <log-prefix>[Provider]</log-prefix>
+      </observability>
+      <verification-ref>V-M-LLM-PROVIDER</verification-ref>
+      <notes>
+        <note-1>Ollama native /api/chat with {"think": false} gives 2-5s response. OpenAI-compatible /v1/chat/completions does NOT support the think parameter — must use native API.</note-1>
+        <note-2>/no_think in prompt text doesn't work — must use the API-level think:false parameter.</note-2>
+        <note-3>Qwen output may include &lt;think&gt;...&lt;/think&gt; wrapper or markdown fences — _parse_llm_json strips these.</note-3>
+      </notes>
+    </M-LLM-PROVIDER>
+
+    <M-EMBEDDING NAME="Embedding Pipeline" TYPE="INTEGRATION" LAYER="1" ORDER="5" STATUS="done">
+      <contract>
+        <purpose>Generate 768-dim vector embeddings via Ollama nomic-embed-text-v2-moe model. Runs in parallel with LLM call.</purpose>
+        <scope>Call Ollama /api/embed, return float vector</scope>
+        <inputs>text string (user prompt from generation log)</inputs>
+        <outputs>768-dim float vector (list[float])</outputs>
+      </contract>
+      <interface>
+        <fn-_embed_text PURPOSE="Call Ollama /api/embed with nomic-embed-text-v2-moe, return embedding vector" />
+      </interface>
+      <depends>M-APP</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <observability>
+        <log-prefix>[Embedding]</log-prefix>
+      </observability>
+      <verification-ref>V-M-EMBEDDING</verification-ref>
+      <notes>
+        <note-1>Runs via ThreadPoolExecutor in parallel with LLM call — does not add latency to summarize flow.</note-1>
+        <note-2>nomic-embed-text-v2-moe produces 768-dim vectors. Qdrant collection configured for cosine similarity.</note-2>
+      </notes>
+    </M-EMBEDDING>
+
+    <M-QDRANT NAME="Qdrant Client Wrapper" TYPE="DATA_LAYER" LAYER="1" ORDER="6" STATUS="done">
+      <contract>
+        <purpose>Qdrant vector DB integration — store embedding vectors with generation metadata payload.</purpose>
+        <scope>Lazy client init, collection creation, point upsert with payload</scope>
+        <inputs>generation_id, embedding vector, metadata (topic, session_id, key_name, model, created_at)</inputs>
+        <outputs>Upsert confirmation</outputs>
+      </contract>
+      <interface>
+        <fn-_get_qdrant_client PURPOSE="Lazy init Qdrant client with graceful fallback if qdrant_client not installed or QDRANT_ENABLED=false" />
+        <fn-_qdrant_ensure_collection PURPOSE="Create Polza_user_logs collection (768-dim, cosine) if not exists" />
+        <fn-_qdrant_upsert PURPOSE="Store vector + payload for a generation_id. Payload: generation_id, topic, session_id, key_name, model, created_at</fn-_qdrant_upsert>
+      </interface>
+      <depends>M-EMBEDDING</depends>
+      <target>
+        <source>polza_dashboard.py</source>
+      </target>
+      <observability>
+        <log-prefix>[Qdrant]</log-prefix>
+      </observability>
+      <verification-ref>V-M-QDRANT</verification-ref>
+      <notes>
+        <note-1>Separate Qdrant container polza-qdrant on VM port 6335 (not shared with socraticode-qdrant).</note-1>
+        <note-2>Collection: Polza_user_logs, 768-dim cosine vectors. Lazy init — no error if qdrant_client not installed.</note-2>
+      </notes>
+    </M-QDRANT>
+
+    <M-PROVIDER-UI NAME="Provider Toggle UI" TYPE="UI_COMPONENT" LAYER="1" ORDER="7" STATUS="done">
+      <contract>
+        <purpose>Sidebar radio buttons for runtime LLM provider switching: On-Prem (Qwen) vs Cloud (Haiku).</purpose>
+        <scope>Provider radio, info labels, toggle handler, updated AI section with provider badge</scope>
+        <inputs>User click on provider radio</inputs>
+        <outputs>POST /api/provider/set, visual feedback with model/cost info</outputs>
+      </contract>
+      <interface>
+        <fn-loadProviderConfig PURPOSE="GET /api/provider/config on page load — populate radio state and info labels" />
+        <fn-setProvider PURPOSE="POST /api/provider/set — switch provider, update UI labels" />
+        <fn-renderAiSection_update PURPOSE="Updated to show provider label (🏠/☁️) and vector badge (🔵 Embedded) in AI block" />
+      </interface>
+      <depends>M-STATIC</depends>
+      <target>
+        <source>static/app.js</source>
+      </target>
+      <verification-ref>V-M-PROVIDER-UI</verification-ref>
+      <notes>
+        <note-1>Radio options: 🏠 On-Prem (Qwen) — free, ~2-5s and ☁️ Cloud (Haiku) — ~$0.002, ~3s.</note-1>
+        <note-2>AI section now shows provider badge and 🔵 Embedded indicator when vector stored in Qdrant.</note-2>
+      </notes>
+    </M-PROVIDER-UI>
 
   </Modules>
 
@@ -341,6 +458,26 @@
       <evidence>N × [GenSummarize] ok + /api/generation/summarize HTTP/1.1 200 repeated in access log</evidence>
     </DF-007>
 
+    <DF-008 NAME="Provider config + switch" TRIGGER="Page load / user clicks provider radio in sidebar">
+      <step-1>Page load: loadProviderConfig() calls GET /api/provider/config — returns {provider, providers: [{id, name, model, cost_info}]}</step-1>
+      <step-2>Frontend populates radio state and info labels (model name, cost estimate)</step-2>
+      <step-3>User clicks alternative provider → setProvider() POST /api/provider/set {provider: "ollama"|"anthropic"}</step-3>
+      <step-4>Backend updates _provider_state dict — takes effect on next _llm_call_summarize dispatch</step-4>
+      <step-5>Response confirms new provider; frontend updates labels and badge</step-5>
+      <evidence>[Provider] switched to ollama/anthropic + GET /api/provider/config returns updated state</evidence>
+    </DF-008>
+
+    <DF-009 NAME="Parallel LLM + Embed + dual store" TRIGGER="User clicks '🧠 Проанализировать' with any provider active">
+      <step-1>Cache miss path: ThreadPoolExecutor submits two futures in parallel</step-1>
+      <step-2>Future-A: _llm_call_summarize dispatches to _llm_call_anthropic() or _llm_call_ollama() based on _provider_state</step-2>
+      <step-3>Future-B: _embed_text() calls Ollama /api/embed with nomic-embed-text-v2-moe — 768-dim vector</step-3>
+      <step-4>Both futures complete → parse LLM JSON via _parse_llm_json</step-4>
+      <step-5>Store in PostgreSQL via gen_summary_upsert (generation_summaries)</step-5>
+      <step-6>Store in Qdrant via _qdrant_upsert (Polza_user_logs) — payload: generation_id, topic, session_id, key_name, model, created_at</step-6>
+      <step-7>Return JSON to frontend — includes provider badge info</step-7>
+      <evidence>[GenSummarize][LLM] ok + [Embedding] dim=768 + [Qdrant][upsert] + [GenSummaryStore][upsert]</evidence>
+    </DF-009>
+
   </DataFlow>
 
   <ImplementationOrder>
@@ -367,6 +504,17 @@
       <step-4 module="M-STATIC" status="done" verification="V-M-STATIC">UI refactor: AI section inside detail modal, compact ai-cell, topic tab, bulk analyze, session sub-block</step-4>
       <step-5 module="M-APP" status="done">Deploy to VM: /home/user/POLZA (consolidated from POLZA.AI + POLZA-new), branch main</step-5>
     </Phase-3>
+
+    <Phase-4 name="Qwen On-Prem + Vector Embeddings" status="done">
+      <goal>Dual LLM provider (Anthropic Cloud + Ollama On-Prem), embedding pipeline via nomic-embed-text-v2-moe, Qdrant vector storage, provider toggle UI</goal>
+      <step-1 module="M-LLM-PROVIDER" status="done" verification="V-M-LLM-PROVIDER">Dual provider abstraction — _llm_call_anthropic, _llm_call_ollama, _llm_call_summarize dispatcher, _parse_llm_json, provider config/set endpoints</step-1>
+      <step-2 module="M-EMBEDDING" status="done" verification="V-M-EMBEDDING">Embedding pipeline via Ollama /api/embed — nomic-embed-text-v2-moe, 768-dim vectors</step-2>
+      <step-3 module="M-QDRANT" status="done" verification="V-M-QDRANT">Qdrant client wrapper — lazy init, collection ensure, upsert with payload (polza-qdrant on port 6335)</step-3>
+      <step-4 module="M-LLM-GEN-SUMMARIZE" status="updated" verification="V-M-LLM-GEN-SUMMARIZE">Refactored: parallel LLM + embed via ThreadPoolExecutor, dual store (PostgreSQL + Qdrant)</step-4>
+      <step-5 module="M-PROVIDER-UI" status="done" verification="V-M-PROVIDER-UI">Sidebar provider toggle — radio buttons, info labels, provider badge in AI section</step-5>
+      <step-6 module="M-APP" status="updated">New endpoints: GET /api/provider/config, POST /api/provider/set. New env vars: LLM_PROVIDER, OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL, OLLAMA_THINKING, OLLAMA_TIMEOUT, QDRANT_URL, QDRANT_COLLECTION, QDRANT_ENABLED</step-6>
+      <step-7 module="M-STATIC" status="updated">Provider toggle in sidebar, updated renderAiSection with provider label and vector badge</step-7>
+    </Phase-4>
 
   </ImplementationOrder>
 
