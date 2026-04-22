@@ -28,6 +28,23 @@
   </div>
   <div class="sidebar-section">
     <h3>⚙ Настройки</h3>
+    <div class="provider-toggle">
+      <h4>🧠 AI Провайдер</h4>
+      <label class="provider-option">
+        <input type="radio" name="provider" value="ollama" onchange="setProvider('ollama')" checked>
+        <span class="provider-label">
+          <span class="provider-icon">🏠</span> On-Prem
+          <span class="provider-info" id="providerOllamaInfo">Qwen 3.5 · $0.00</span>
+        </span>
+      </label>
+      <label class="provider-option">
+        <input type="radio" name="provider" value="anthropic" onchange="setProvider('anthropic')">
+        <span class="provider-label">
+          <span class="provider-icon">☁️</span> Cloud
+          <span class="provider-info" id="providerAnthropicInfo">Haiku 4.5 · ~$0.002</span>
+        </span>
+      </label>
+    </div>
     <div class="theme-toggle">
       <input type="checkbox" id="themeSwitch" onchange="toggleTheme()">
       <span>Светлая тема</span>

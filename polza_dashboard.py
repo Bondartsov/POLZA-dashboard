@@ -10,6 +10,7 @@ Architecture:
 """
 import argparse, json, os, sys, threading, time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, send_from_directory
@@ -40,9 +41,28 @@ from sync_worker import SyncWorker, sync_all_keys
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 sync_worker = None
 AUTH_TOKEN = ""
-LLM_API_URL = "https://api.anthropic.com/v1/messages"  # overridden from .env
-LLM_MODEL = "claude-haiku-4-5"  # Anthropic alias → always latest Haiku 4.5. Overridden from .env.
-LLM_API_KEY = ""  # Anthropic API key; overridden from .env
+
+# ─── LLM Provider config (overridden from .env) ────────────────────────────────
+# Cloud (Anthropic)
+LLM_API_URL = "https://api.anthropic.com/v1/messages"
+LLM_MODEL = "claude-haiku-4-5"
+LLM_API_KEY = ""
+
+# On-prem (Ollama)
+LLM_PROVIDER = "ollama"  # "anthropic" | "ollama" — runtime switchable via /api/provider/set
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_CHAT_MODEL = "qwen3.5:4b"
+OLLAMA_EMBED_MODEL = "nomic-embed-text-v2-moe:latest"
+OLLAMA_THINKING = False  # if True, allows Qwen thinking mode (slower but deeper)
+OLLAMA_TIMEOUT = 120
+
+# Qdrant (vector DB)
+QDRANT_URL = "http://localhost:6335"
+QDRANT_COLLECTION = "Polza_user_logs"
+QDRANT_ENABLED = True  # set False to disable vector storage
+
+# Runtime provider state (in-memory, can be switched via API)
+_provider_state = {"provider": "ollama"}  # default, overridden by .env then API
 
 
 # ─── .env loader ─────────────────────────────────────────────────────────────────
@@ -176,6 +196,48 @@ def api_health():
         return jsonify({"status": "error", "detail": str(e)}), 502
     finally:
         session.close()
+
+
+# ─── Routes: Provider Config ───────────────────────────────────────────────────
+
+@app.route("/api/provider/config")
+def api_provider_config():
+    """Return current LLM provider settings for frontend toggle."""
+    provider = _provider_state["provider"]
+    config = {
+        "provider": provider,
+        "ollama": {
+            "baseUrl": OLLAMA_BASE_URL,
+            "chatModel": OLLAMA_CHAT_MODEL,
+            "embedModel": OLLAMA_EMBED_MODEL,
+            "thinking": OLLAMA_THINKING,
+        },
+        "anthropic": {
+            "model": LLM_MODEL,
+            "available": bool(LLM_API_KEY),
+        },
+    }
+    if provider == "ollama":
+        config["activeModel"] = OLLAMA_CHAT_MODEL
+        config["activeCost"] = "$0.000"
+        config["activeEstimate"] = "~5-10 сек" if not OLLAMA_THINKING else "~60 сек"
+    else:
+        config["activeModel"] = LLM_MODEL
+        config["activeCost"] = "~$0.002"
+        config["activeEstimate"] = "~2-3 сек"
+    return jsonify(config)
+
+
+@app.route("/api/provider/set", methods=["POST"])
+def api_provider_set():
+    """Switch LLM provider at runtime. Body: {provider: "ollama"|"anthropic"}."""
+    data = request.get_json(silent=True) or {}
+    provider = data.get("provider", "")
+    if provider not in ("ollama", "anthropic"):
+        return jsonify({"error": "provider must be 'ollama' or 'anthropic'"}), 400
+    _provider_state["provider"] = provider
+    print(f"[Provider] switched to {provider}")
+    return jsonify({"ok": True, "provider": provider})
 
 
 # ─── Routes: DB-backed generations ────────────────────────────────────────────────
@@ -1153,18 +1215,53 @@ GEN_SUMMARIZE_PROMPT = """Ты — аналитик корпоративного
 
 # START_BLOCK_GEN_SUMMARIZE_HELPERS
 
-def _llm_call_summarize(user_text: str):
-    """
-    Call Anthropic API with prompt caching enabled.
-    Returns tuple (parsed_dict, usage_dict) or raises.
-    Uses cache_control on system prompt so repeated calls are ~10x cheaper.
-    """
+def _parse_llm_json(raw_text: str) -> dict:
+    """Robust JSON parser for LLM output. Handles markdown wrapping, extra text."""
+    json_str = raw_text.strip()
+    # Try direct parse
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+    # Extract from ```json ... ``` code block
+    import re
+    m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", json_str, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    # Extract first { ... } block
+    m = re.search(r"\{[^{}]*\}", json_str, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+    # Last resort: extract nested { ... } with depth tracking
+    depth = 0
+    start = None
+    for i, ch in enumerate(json_str):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    return json.loads(json_str[start:i + 1])
+                except json.JSONDecodeError:
+                    start = None
+    raise json.JSONDecodeError("Could not extract JSON from LLM output", json_str, 0)
+
+
+def _llm_call_anthropic(user_text: str):
+    """Call Anthropic Claude API. Returns (parsed_dict, usage_info)."""
     llm_payload = {
         "model": LLM_MODEL,
         "max_tokens": 600,
         "temperature": 0.2,
-        # System as array with cache_control → Anthropic caches this block.
-        # Even if token count is below min cache threshold, API accepts silently.
         "system": [
             {
                 "type": "text",
@@ -1176,22 +1273,16 @@ def _llm_call_summarize(user_text: str):
             {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{user_text}"},
         ],
     }
-
     _llm_headers = {
         "x-api-key": LLM_API_KEY,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
-
     llm_r = http_requests.post(
-        LLM_API_URL,
-        headers=_llm_headers,
-        json=llm_payload,
-        timeout=45,
+        LLM_API_URL, headers=_llm_headers, json=llm_payload, timeout=45,
     )
-
     if llm_r.status_code != 200:
-        raise ValueError(f"LLM HTTP {llm_r.status_code}: {llm_r.text[:300]}")
+        raise ValueError(f"Anthropic HTTP {llm_r.status_code}: {llm_r.text[:300]}")
 
     llm_response = llm_r.json()
     llm_content = ""
@@ -1200,19 +1291,10 @@ def _llm_call_summarize(user_text: str):
             llm_content += block.get("text", "")
 
     if not llm_content:
-        raise ValueError("LLM returned empty content")
+        raise ValueError("Anthropic returned empty content")
 
-    # Parse JSON (handle markdown wrapping)
-    json_str = llm_content.strip()
-    if json_str.startswith("```"):
-        lines = json_str.split("\n")
-        json_str = "\n".join(lines[1:-1])
-    if json_str.startswith("json"):
-        json_str = json_str[4:].strip()
+    parsed = _parse_llm_json(llm_content)
 
-    parsed = json.loads(json_str)
-
-    # Extract usage (including cache tokens)
     usage = llm_response.get("usage", {}) or {}
     usage_info = {
         "input_tokens": usage.get("input_tokens", 0),
@@ -1220,19 +1302,166 @@ def _llm_call_summarize(user_text: str):
         "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
         "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
     }
-
-    # Compute cost: Haiku 4.5 pricing (USD per 1M tokens, approx):
-    #   input: $1.00, output: $5.00, cache_write: $1.25, cache_read: $0.10
-    # We store in USD for simplicity (frontend shows info only).
     cost = (
         usage_info["input_tokens"] * 1.0
         + usage_info["output_tokens"] * 5.0
         + usage_info["cache_creation_input_tokens"] * 1.25
         + usage_info["cache_read_input_tokens"] * 0.10
     ) / 1_000_000
-
     usage_info["cost_usd"] = round(cost, 6)
+    usage_info["model"] = LLM_MODEL
+    usage_info["provider"] = "anthropic"
     return parsed, usage_info
+
+
+def _llm_call_ollama(user_text: str):
+    """Call Ollama (Qwen) via OpenAI-compatible API. Returns (parsed_dict, usage_info)."""
+    system_prompt = GEN_SUMMARIZE_PROMPT
+    if not OLLAMA_THINKING:
+        system_prompt += "\n/no_think"
+
+    payload = {
+        "model": OLLAMA_CHAT_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{user_text}"},
+        ],
+        "temperature": 0.2,
+        "stream": False,
+    }
+    chat_url = f"{OLLAMA_BASE_URL}/v1/chat/completions"
+
+    r = http_requests.post(chat_url, json=payload, timeout=OLLAMA_TIMEOUT)
+    if r.status_code != 200:
+        raise ValueError(f"Ollama HTTP {r.status_code}: {r.text[:500]}")
+
+    data = r.json()
+    content = ""
+    choices = data.get("choices", [])
+    if choices:
+        content = choices[0].get("message", {}).get("content", "")
+
+    if not content:
+        raise ValueError("Ollama returned empty content")
+
+    parsed = _parse_llm_json(content)
+
+    # Ollama usage info (approximate)
+    usage_data = data.get("usage", {}) or {}
+    usage_info = {
+        "input_tokens": usage_data.get("prompt_tokens", 0),
+        "output_tokens": usage_data.get("completion_tokens", 0),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cost_usd": 0.0,
+        "model": OLLAMA_CHAT_MODEL,
+        "provider": "ollama",
+    }
+    return parsed, usage_info
+
+
+def _llm_call_summarize(user_text: str):
+    """
+    Dispatcher: call current provider (Anthropic or Ollama).
+    Returns tuple (parsed_dict, usage_dict).
+    """
+    provider = _provider_state["provider"]
+    if provider == "ollama":
+        return _llm_call_ollama(user_text)
+    else:
+        return _llm_call_anthropic(user_text)
+
+
+# ─── Embedding pipeline ────────────────────────────────────────────────────────
+
+_qdrant_client = None
+
+def _get_qdrant_client():
+    """Lazy-init Qdrant client. Returns None if qdrant_client not installed or disabled."""
+    global _qdrant_client
+    if not QDRANT_ENABLED:
+        return None
+    if _qdrant_client is not None:
+        return _qdrant_client
+    try:
+        from qdrant_client import QdrantClient
+        _qdrant_client = QdrantClient(url=QDRANT_URL, timeout=10)
+        print(f"[Qdrant] connected to {QDRANT_URL}")
+        return _qdrant_client
+    except ImportError:
+        print("[Qdrant] qdrant_client not installed — embeddings disabled")
+        return None
+    except Exception as e:
+        print(f"[Qdrant] connection failed: {e}")
+        return None
+
+
+def _qdrant_ensure_collection():
+    """Create Polza_user_logs collection if it doesn't exist."""
+    client = _get_qdrant_client()
+    if not client:
+        return False
+    try:
+        from qdrant_client.models import Distance, VectorParams
+        collections = client.get_collections().collections
+        names = [c.name for c in collections]
+        if QDRANT_COLLECTION not in names:
+            client.create_collection(
+                collection_name=QDRANT_COLLECTION,
+                vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+            )
+            print(f"[Qdrant] created collection '{QDRANT_COLLECTION}' (768-dim cosine)")
+        return True
+    except Exception as e:
+        print(f"[Qdrant] ensure_collection error: {e}")
+        return False
+
+
+def _embed_text(text: str):
+    """Get embedding vector from Ollama (nomic-embed-text-v2-moe). Returns list[float] or None."""
+    if not text or not text.strip():
+        return None
+    try:
+        r = http_requests.post(
+            f"{OLLAMA_BASE_URL}/api/embed",
+            json={"model": OLLAMA_EMBED_MODEL, "input": text[:2000]},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            print(f"[Embed] Ollama HTTP {r.status_code}: {r.text[:200]}")
+            return None
+        data = r.json()
+        embeddings = data.get("embeddings", [])
+        if embeddings and len(embeddings[0]) == 768:
+            return embeddings[0]
+        print(f"[Embed] unexpected response shape: {len(embeddings)} vectors")
+        return None
+    except Exception as e:
+        print(f"[Embed] error: {e}")
+        return None
+
+
+def _qdrant_upsert(gen_id: str, vector: list, payload: dict):
+    """Store embedding in Qdrant. Returns True on success."""
+    client = _get_qdrant_client()
+    if not client or not vector:
+        return False
+    try:
+        from qdrant_client.models import PointStruct
+        import hashlib
+        # Use UUID-based integer for point ID (Qdrant requires int or UUID)
+        point_id = int(hashlib.md5(gen_id.encode()).hexdigest()[:16], 16)
+        client.upsert(
+            collection_name=QDRANT_COLLECTION,
+            points=[
+                PointStruct(id=point_id, vector=vector, payload=payload)
+            ],
+        )
+        print(f"[Qdrant] upsert gen_id={gen_id[:16]} dim={len(vector)}")
+        return True
+    except Exception as e:
+        print(f"[Qdrant] upsert error: {e}")
+        return False
 
 
 def _extract_user_text_from_log(log_data: dict, limit_chars: int = 4000) -> str:
@@ -1306,13 +1535,31 @@ def api_generation_summarize():
             }), 200
 
         # START_BLOCK_GEN_CALL_LLM
-        print(f"[GenSummarize][LLM] model={LLM_MODEL} text_chars={len(total_text)}")
-        parsed, usage = _llm_call_summarize(total_text)
+        provider = _provider_state["provider"]
+        active_model = OLLAMA_CHAT_MODEL if provider == "ollama" else LLM_MODEL
+        print(f"[GenSummarize][LLM] provider={provider} model={active_model} text_chars={len(total_text)}")
+
+        # Parallel: LLM summarize + embedding
+        llm_result = [None, None]  # [parsed, usage]
+        embed_result = [None]  # [vector]
+
+        def _run_llm():
+            llm_result[0], llm_result[1] = _llm_call_summarize(total_text)
+
+        def _run_embed():
+            embed_result[0] = _embed_text(total_text)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            llm_future = pool.submit(_run_llm)
+            embed_future = pool.submit(_run_embed)
+            # Wait for both (LLM is the long pole)
+            llm_future.result(timeout=OLLAMA_TIMEOUT if provider == "ollama" else 45)
+            embed_future.result(timeout=30)
+
+        parsed, usage = llm_result
         print(
-            f"[GenSummarize][LLM] ok "
+            f"[GenSummarize][LLM] ok provider={provider} "
             f"input={usage['input_tokens']} output={usage['output_tokens']} "
-            f"cache_w={usage['cache_creation_input_tokens']} "
-            f"cache_r={usage['cache_read_input_tokens']} "
             f"cost=${usage['cost_usd']:.6f}"
         )
         # END_BLOCK_GEN_CALL_LLM
@@ -1326,16 +1573,42 @@ def api_generation_summarize():
                 is_work=parsed.get("is_work", True),
                 project_guess=parsed.get("project_guess"),
                 risk_flags=parsed.get("risk_flags", []),
-                llm_model=LLM_MODEL,
+                llm_model=usage.get("model", active_model),
                 llm_cost=usage["cost_usd"],
-                cache_creation_tokens=usage["cache_creation_input_tokens"],
-                cache_read_tokens=usage["cache_read_input_tokens"],
+                cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
+                cache_read_tokens=usage.get("cache_read_input_tokens", 0),
                 input_tokens=usage["input_tokens"],
                 output_tokens=usage["output_tokens"],
             )
         except Exception as e:
             print(f"[GenSummarize][cache_store] non-fatal: {e}")
         # END_BLOCK_GEN_CACHE_STORE
+
+        # START_BLOCK_GEN_VECTOR_STORE
+        vector_stored = False
+        if embed_result[0]:
+            # Fetch generation metadata for payload
+            dbs = get_session()
+            gen_meta = None
+            try:
+                gen_obj = dbs.query(Generation).get(gen_id)
+                if gen_obj:
+                    gen_meta = gen_obj.to_dict()
+            finally:
+                dbs.close()
+
+            qdrant_payload = {
+                "generation_id": gen_id,
+                "user_text_snippet": total_text[:200],
+                "topic": parsed.get("topic", ""),
+                "is_work": parsed.get("is_work", True),
+                "session_id": gen_meta.get("session_id", "") if gen_meta else "",
+                "api_key_name": gen_meta.get("sourceKeyName", "") if gen_meta else "",
+                "model_used": gen_meta.get("modelDisplayName", "") if gen_meta else "",
+                "created_at": gen_meta.get("createdAt", "") if gen_meta else "",
+            }
+            vector_stored = _qdrant_upsert(gen_id, embed_result[0], qdrant_payload)
+        # END_BLOCK_GEN_VECTOR_STORE
 
         return jsonify({
             "generationId": gen_id,
@@ -1344,12 +1617,14 @@ def api_generation_summarize():
             "isWork": parsed.get("is_work", True),
             "projectGuess": parsed.get("project_guess"),
             "riskFlags": parsed.get("risk_flags", []),
-            "llmModel": LLM_MODEL,
+            "llmModel": usage.get("model", active_model),
             "llmCost": usage["cost_usd"],
-            "cacheCreationTokens": usage["cache_creation_input_tokens"],
-            "cacheReadTokens": usage["cache_read_input_tokens"],
+            "cacheCreationTokens": usage.get("cache_creation_input_tokens", 0),
+            "cacheReadTokens": usage.get("cache_read_input_tokens", 0),
             "inputTokens": usage["input_tokens"],
             "outputTokens": usage["output_tokens"],
+            "provider": provider,
+            "vectorStored": vector_stored,
             "cached": False,
         })
 
@@ -1541,7 +1816,11 @@ def api_session_summarize_stop():
 # ─── Main ─────────────────────────────────────────────────────────────────────────
 
 def main():
-    global AUTH_TOKEN, sync_worker, LLM_API_URL, LLM_MODEL, LLM_API_KEY
+    global AUTH_TOKEN, sync_worker
+    global LLM_API_URL, LLM_MODEL, LLM_API_KEY
+    global LLM_PROVIDER, OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL
+    global OLLAMA_THINKING, OLLAMA_TIMEOUT
+    global QDRANT_URL, QDRANT_COLLECTION, QDRANT_ENABLED
 
     load_env()
     parser = argparse.ArgumentParser(description="Polza.AI Dashboard v3")
@@ -1551,15 +1830,47 @@ def main():
     args = parser.parse_args()
 
     AUTH_TOKEN = os.environ.get("POLZA_API_KEY", "")
+
+    # Cloud (Anthropic) config
     LLM_API_URL = os.environ.get("LLM_API_URL", LLM_API_URL)
     LLM_MODEL = os.environ.get("LLM_MODEL", LLM_MODEL)
     LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 
-    print(f"🧠 LLM config: url={LLM_API_URL}, model={LLM_MODEL}, key={'✅' if LLM_API_KEY else '❌ NOT SET'}")
+    # On-prem (Ollama) config
+    LLM_PROVIDER = os.environ.get("LLM_PROVIDER", LLM_PROVIDER)
+    OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", OLLAMA_BASE_URL)
+    OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL", OLLAMA_CHAT_MODEL)
+    OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", OLLAMA_EMBED_MODEL)
+    OLLAMA_THINKING = os.environ.get("OLLAMA_THINKING", "").lower() in ("true", "1", "yes")
+    OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", OLLAMA_TIMEOUT))
+
+    # Qdrant config
+    QDRANT_URL = os.environ.get("QDRANT_URL", QDRANT_URL)
+    QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", QDRANT_COLLECTION)
+    QDRANT_ENABLED = os.environ.get("QDRANT_ENABLED", "true").lower() in ("true", "1", "yes")
+
+    # Set runtime provider from env
+    _provider_state["provider"] = LLM_PROVIDER
+
+    provider_icon = "🏠 On-Prem" if LLM_PROVIDER == "ollama" else "☁️ Cloud"
+    print(f"🧠 LLM provider: {provider_icon} ({LLM_PROVIDER})")
+    if LLM_PROVIDER == "ollama":
+        print(f"   Ollama: {OLLAMA_BASE_URL}, model={OLLAMA_CHAT_MODEL}, embed={OLLAMA_EMBED_MODEL}")
+        print(f"   Thinking: {'ON' if OLLAMA_THINKING else 'OFF'}, timeout={OLLAMA_TIMEOUT}s")
+    else:
+        print(f"   Anthropic: url={LLM_API_URL}, model={LLM_MODEL}, key={'✅' if LLM_API_KEY else '❌'}")
+    print(f"📦 Qdrant: {QDRANT_URL}/{QDRANT_COLLECTION} ({'enabled' if QDRANT_ENABLED else 'disabled'})")
 
     # Init DB
     init_db()
     print("✅ PostgreSQL connected")
+
+    # Init Qdrant
+    if QDRANT_ENABLED:
+        if _qdrant_ensure_collection():
+            print(f"✅ Qdrant collection '{QDRANT_COLLECTION}' ready")
+        else:
+            print(f"⚠️ Qdrant init failed — embeddings will be skipped")
 
     # Register primary key from .env
     if AUTH_TOKEN:

@@ -69,6 +69,17 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .theme-toggle input[type="checkbox"]:checked{background:var(--accent)}
 .theme-toggle input[type="checkbox"]:checked::after{content:'☀️';left:18px}
 
+/* ─── Provider toggle ─── */
+.provider-toggle{margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.provider-toggle h4{font-size:12px;margin-bottom:8px;color:var(--text2)}
+.provider-option{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:12px;transition:background .15s;margin-bottom:3px}
+.provider-option:hover{background:var(--bg3)}
+.provider-option input[type="radio"]{accent-color:var(--accent);width:14px;height:14px;cursor:pointer}
+.provider-label{display:flex;align-items:center;gap:6px}
+.provider-icon{font-size:14px}
+.provider-info{font-size:10px;color:var(--text2);margin-left:auto}
+.provider-option input[type="radio"]:checked ~ .provider-label .provider-info{color:var(--accent)}
+
 /* ─── Global Progress Banner (sticky under topbar) ─── */
 .progress-banner{position:sticky;top:49px;z-index:99;background:var(--bg2);border-bottom:1px solid var(--accent);padding:8px 20px}
 .progress-banner-text{font-size:12px;color:var(--text);margin-bottom:4px;font-weight:500}

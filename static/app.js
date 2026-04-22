@@ -11,6 +11,8 @@ const S = {
   autoRefresh: true, refreshTimer: null, lastUpdate: null,
   keyNames: new Set(),
   balance: null,
+  provider: 'ollama',  // current AI provider: 'ollama' | 'anthropic'
+  providerConfig: null, // full config from /api/provider/config
 };
 const KEY_COLORS = ['#6c7bf0','#4ade80','#f87171','#fbbf24','#60a5fa','#c084fc','#fb923c','#22d3ee','#f472b6','#a3e635','#f97316','#14b8a6'];
 const charts = {};
@@ -87,6 +89,7 @@ async function loadBalance() {
 document.addEventListener('DOMContentLoaded', async () => {
   initTheme();
   loadBalance();
+  loadProviderConfig();
 
   try {
     const c = await (await fetch('/api/config')).json();
@@ -143,6 +146,54 @@ function toggleSidebar() {
 function closeSidebar() {
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sidebarBackdrop').classList.remove('open');
+}
+
+// ─── Provider ──────────────────────────────────────────────────────────────────
+async function loadProviderConfig() {
+  try {
+    const r = await fetch('/api/provider/config');
+    if (!r.ok) return;
+    const cfg = await r.json();
+    S.providerConfig = cfg;
+    S.provider = cfg.provider;
+    // Update radio buttons
+    const radios = document.querySelectorAll('input[name="provider"]');
+    radios.forEach(r => r.checked = (r.value === S.provider));
+    // Update info labels
+    if (cfg.ollama) {
+      const oi = document.getElementById('providerOllamaInfo');
+      if (oi) oi.textContent = `${cfg.ollama.chatModel} · $0.00`;
+    }
+    if (cfg.anthropic) {
+      const ai = document.getElementById('providerAnthropicInfo');
+      if (ai) ai.textContent = `${cfg.anthropic.model} · ~$0.002`;
+    }
+  } catch(e) { console.warn('provider config load failed:', e); }
+}
+
+async function setProvider(provider) {
+  try {
+    const r = await fetch('/api/provider/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider}),
+    });
+    if (!r.ok) return;
+    S.provider = provider;
+    // Update config for UI labels
+    if (S.providerConfig) S.providerConfig.provider = provider;
+    console.log('Provider switched to:', provider);
+  } catch(e) { console.warn('provider switch failed:', e); }
+}
+
+function getProviderLabel() {
+  if (S.provider === 'ollama') return 'Qwen · бесплатно';
+  return 'Haiku · ~$0.002';
+}
+
+function getProviderEstimate() {
+  if (S.provider === 'ollama') return '~5-10 сек';
+  return '~2-3 сек';
 }
 
 function renderKeyList() {
@@ -847,7 +898,7 @@ function renderAiSection(genId, li) {
       <div class="ai-block-empty">
         <p>Модель проанализирует промпт и выдаст: тему, описание задачи, предполагаемый проект, флаги рисков.</p>
         <button class="btn btn-primary" onclick="runGenAnalysis('${genId}')">🧠 Проанализировать</button>
-        <span class="ai-block-hint">Вызов ~ $0.002 · Claude Haiku 4.5</span>
+        <span class="ai-block-hint">${getProviderLabel()} · ${getProviderEstimate()}</span>
       </div>`;
   } else {
     const isPersonal = sum.isWork === false;
@@ -861,11 +912,13 @@ function renderAiSection(genId, li) {
     const metaHtml = `
       <div class="ai-meta">
         ${sum.cached ? '✅ из кеша БД' : '🆕 только что'}
+        ${sum.provider === 'ollama' ? ' · 🏠 On-Prem' : ' · ☁️ Cloud'}
         ${sum.llmModel ? ` · ${esc(sum.llmModel)}` : ''}
         ${sum.updatedAt ? ` · ${fmtDate(sum.updatedAt)}` : ''}
         ${sum.llmCost != null ? ` · $${Number(sum.llmCost).toFixed(6)}` : ''}
         ${sum.inputTokens ? ` · in ${fmtNum(sum.inputTokens)} / out ${fmtNum(sum.outputTokens||0)}` : ''}
         ${sum.cacheReadTokens ? ` · cache_read ${fmtNum(sum.cacheReadTokens)}` : ''}
+        ${sum.vectorStored ? ' · 📐 вектор' : ''}
       </div>`;
 
     html += `
@@ -922,13 +975,14 @@ function renderAiSection(genId, li) {
 
 async function runGenAnalysis(genId, force = false) {
   const block = document.getElementById(`aiBlock_${genId}`);
+  const providerName = S.provider === 'ollama' ? 'Qwen' : 'Claude Haiku';
   if (block) {
     block.innerHTML = `
       <div class="ai-block-header">
         <div class="ai-block-title">🧠 AI-анализ запроса</div>
         <div class="ai-block-status">⏳ анализирую...</div>
       </div>
-      <div class="ai-block-loading"><div class="spinner"></div> Claude Haiku обрабатывает промпт...</div>`;
+      <div class="ai-block-loading"><div class="spinner"></div> ${esc(providerName)} обрабатывает промпт...</div>`;
   }
   try {
     const r = await fetch('/api/generation/summarize', {
