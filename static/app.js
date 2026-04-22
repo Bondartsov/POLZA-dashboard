@@ -948,17 +948,80 @@ async function backfillStop() {
   renderBackfillIndicator(data);
 }
 
-// ─── Analyze ALL (background) ────────────────────────────────────────────────
+// ─── Analyze ALL (persistent, DB-backed) ─────────────────────────────────────
 
 let _analyzeAllPollTimer = null;
 
+// Load analysis stats on every page load — always visible
+async function loadAnalysisStats() {
+  try {
+    const r = await fetch('/api/analysis-stats');
+    if (!r.ok) return;
+    const data = await r.json();
+    S.analyzeAllRunning = data.job && (data.job.status === 'running' || data.job.status === 'paused');
+    renderAnalysisStats(data);
+    // If job is running/paused, start polling
+    if (S.analyzeAllRunning) startAnalyzeAllPoll();
+  } catch(e) { console.warn('analysis-stats load failed:', e); }
+}
+
+function renderAnalysisStats(data) {
+  const el = document.getElementById('analysisStats');
+  const text = document.getElementById('analysisStatsText');
+  if (!el || !text) return;
+
+  const total = data.total || 0;
+  const analyzed = data.analyzed || 0;
+  const remaining = data.remaining || 0;
+  const job = data.job || {};
+  const isRunning = job.status === 'running';
+  const isPaused = job.status === 'paused';
+
+  // Always show if there are records
+  if (total === 0) { el.style.display = 'none'; return; }
+  el.style.display = 'flex';
+  el.classList.toggle('active', isRunning || isPaused);
+
+  const pct = total > 0 ? Math.round(analyzed / total * 100) : 0;
+
+  if (isRunning || isPaused) {
+    const label = isPaused ? '⏸' : '⏳';
+    const eta = (!isPaused && job.done > 0) ? _estimateEta(job) : '';
+    text.innerHTML = `${label} <span class="stats-done">${analyzed}</span>/${total} (<span class="stats-pct">${pct}%</span>) <span class="stats-remaining">−${remaining}</span> ${eta}`;
+    // Update button
+    const btn = document.getElementById('btnAnalyzeAll');
+    if (btn) { btn.textContent = isRunning ? '⏸ Пауза' : '▶ Продолжить'; }
+  } else if (remaining > 0) {
+    text.innerHTML = `📊 <span class="stats-done">${analyzed}</span>/${total} (<span class="stats-pct">${pct}%</span>) <span class="stats-remaining">−${remaining} не анал.</span>`;
+    const btn = document.getElementById('btnAnalyzeAll');
+    if (btn) { btn.textContent = '🧠 Анализ всех'; }
+  } else {
+    text.innerHTML = `✅ <span class="stats-done">${analyzed}</span>/${total} — все проанализированы`;
+    const btn = document.getElementById('btnAnalyzeAll');
+    if (btn) { btn.textContent = '🧠 Анализ всех'; }
+  }
+}
+
 async function startAnalyzeAll() {
   const btn = document.getElementById('btnAnalyzeAll');
-  if (_analyzeAllPollTimer) {
-    // Already running → stop
-    await fetch('/api/analyze-all/stop', { method: 'POST' });
+  // If running → pause
+  if (S.analyzeAllRunning && !document.getElementById('analysisStats')?.classList.contains('paused-state')) {
+    await fetch('/api/analyze-all/pause', { method: 'POST' });
     return;
   }
+  // Check if paused → resume
+  try {
+    const stats = await (await fetch('/api/analysis-stats')).json();
+    if (stats.job?.status === 'paused') {
+      btn.disabled = true;
+      btn.textContent = '⏳ Возобновление...';
+      await fetch('/api/analyze-all/start', { method: 'POST' });
+      btn.disabled = false;
+      startAnalyzeAllPoll();
+      return;
+    }
+  } catch(e) {}
+
   if (!confirm(`Запустить AI-анализ всех неанализированных записей?\n\nПровайдер: ${getProviderLabel()}\nЭто может занять значительное время.`)) return;
   btn.disabled = true;
   btn.textContent = '⏳ Запуск...';
@@ -973,7 +1036,7 @@ async function startAnalyzeAll() {
 
 function startAnalyzeAllPoll() {
   if (_analyzeAllPollTimer) return;
-  _analyzeAllPollTimer = setInterval(pollAnalyzeAllStatus, 1500);
+  _analyzeAllPollTimer = setInterval(pollAnalyzeAllStatus, 2000);
   pollAnalyzeAllStatus();
 }
 
@@ -983,97 +1046,79 @@ function stopAnalyzeAllPoll() {
 
 async function pollAnalyzeAllStatus() {
   try {
-    const data = await (await fetch('/api/analyze-all/status')).json();
-    S.analyzeAllRunning = data.running;
-    renderAnalyzeAllIndicator(data);
-    const banner = document.getElementById('progressBanner');
-    const processed = data.done + data.skipped + data.errors;
-    const pct = data.total > 0 ? Math.round(processed / data.total * 100) : 0;
+    const data = await (await fetch('/api/analysis-stats')).json();
+    S.analyzeAllRunning = data.job && (data.job.status === 'running' || data.job.status === 'paused');
+    renderAnalysisStats(data);
 
-    if (data.running) {
-      const pausedLabel = data.paused ? ' ⏸ ПАУЗА' : '';
-      const eta = data.done > 0 && !data.paused ? _estimateEta(data) : '';
+    const banner = document.getElementById('progressBanner');
+    const job = data.job || {};
+    const processed = (job.done || 0) + (job.skipped || 0) + (job.errors || 0);
+    const total = job.total || data.total || 1;
+    const pct = Math.round(processed / total * 100);
+
+    if (job.status === 'running') {
+      const eta = job.done > 0 ? _estimateEta(job) : '';
       showProgress(
-        `🧠 AI-анализ${pausedLabel}: ${data.done} готово / ${data.total} всего (${data.errors} ош.) ${eta}`,
+        `🧠 AI-анализ: ${job.done} готово / ${data.remaining} осталось (${job.errors} ош.) ${eta}`,
         pct
       );
-      // Update banner with pause/resume and stop buttons
       const pt = document.getElementById('progressText');
-      pt.innerHTML = `🧠 AI-анализ${pausedLabel}: <b>${data.done}</b>/${data.total} (${pct}%) · ${data.errors} ош. ${eta}
-        <button class="btn btn-small" style="margin-left:8px;padding:2px 10px" onclick="toggleAnalyzeAllPause()">${data.paused ? '▶ Продолжить' : '⏸ Пауза'}</button>
+      pt.innerHTML = `🧠 AI-анализ: <b>${job.done}</b>/${total} (${pct}%) · ${data.remaining} осталось ${eta}
+        <button class="btn btn-small" style="margin-left:8px;padding:2px 10px" onclick="toggleAnalyzeAllPause()">⏸ Пауза</button>
         <button class="btn btn-small btn-danger" style="margin-left:4px;padding:2px 10px" onclick="stopAnalyzeAll()">⏹ Стоп</button>`;
-      // Refresh table to show updated status icons (queued → done as they complete)
-      if (data.done > 0) await prefetchSummaries();
-      renderTable();
-    } else {
-      hideProgress();
-      if (data.done > 0 || data.skipped > 0) {
-        stopAnalyzeAllPoll();
+      // Refresh table periodically
+      if ((job.done || 0) > 0 && (job.done % 3 === 0)) {
         await prefetchSummaries();
         renderTable();
-        // Show completion toast for 5 seconds
-        showProgress(`✅ AI-анализ завершён: ${data.done} проанализировано, ${data.skipped} пропущено, ${data.errors} ошибок`, 100);
-        setTimeout(hideProgress, 5000);
-      } else {
-        stopAnalyzeAllPoll();
       }
+    } else if (job.status === 'paused') {
+      showProgress(`⏸ AI-анализ на паузе: ${job.done} готово, ${data.remaining} осталось`, pct);
+      const pt = document.getElementById('progressText');
+      pt.innerHTML = `⏸ AI-анализ на паузе: <b>${job.done}</b>/${total} (${pct}%) · ${data.remaining} осталось
+        <button class="btn btn-small" style="margin-left:8px;padding:2px 10px" onclick="resumeAnalyzeAll()">▶ Продолжить</button>
+        <button class="btn btn-small btn-danger" style="margin-left:4px;padding:2px 10px" onclick="stopAnalyzeAll()">⏹ Стоп</button>`;
+    } else {
+      // Not running
+      hideProgress();
+      stopAnalyzeAllPoll();
+      if (data.remaining > 0 && data.analyzed > 0) {
+        // Some analyzed, some remaining — show completion toast
+        showProgress(`📊 Проанализировано ${data.analyzed} из ${data.total} (${data.remaining} осталось)`, Math.round(data.analyzed / data.total * 100));
+        setTimeout(hideProgress, 5000);
+      }
+      await prefetchSummaries();
+      renderTable();
     }
   } catch(e) { /* ignore */ }
-}
-
-function _estimateEta(d) {
-  if (!d.startedAt || d.done < 1) return '';
-  const start = new Date(d.startedAt).getTime();
-  const now = d.lastUpdate ? new Date(d.lastUpdate).getTime() : Date.now();
-  const elapsed = (now - start) / 1000; // seconds
-  const perItem = elapsed / d.done;
-  const remaining = (d.total - d.done - d.skipped - d.errors) * perItem;
-  if (remaining < 60) return `~${Math.round(remaining)}с осталось`;
-  if (remaining < 3600) return `~${Math.round(remaining / 60)} мин осталось`;
-  return `~${(remaining / 3600).toFixed(1)}ч осталось`;
 }
 
 async function toggleAnalyzeAllPause() {
   await fetch('/api/analyze-all/pause', { method: 'POST' });
 }
 
+async function resumeAnalyzeAll() {
+  await fetch('/api/analyze-all/start', { method: 'POST' });
+}
+
 async function stopAnalyzeAll() {
   await fetch('/api/analyze-all/stop', { method: 'POST' });
 }
 
-function renderAnalyzeAllIndicator(d) {
-  const el = document.getElementById('analyzeAllIndicator');
-  const icon = document.getElementById('analyzeAllIcon');
-  const text = document.getElementById('analyzeAllText');
-  const time = document.getElementById('analyzeAllTime');
-
-  if (!d.running && d.done === 0 && d.skipped === 0 && d.errors === 0) {
-    el.style.display = 'none';
-    return;
-  }
-
-  el.style.display = 'flex';
-  const processed = d.done + d.skipped + d.errors;
-  const pct = d.total > 0 ? Math.round(processed / d.total * 100) : 0;
-
-  if (d.running) {
-    icon.textContent = d.paused ? '⏸' : '⏳';
-    text.textContent = `🧠 ${d.done}/${d.total} (${pct}%)${d.paused ? ' ПАУЗА' : ''}`;
-    time.textContent = d.lastUpdate ? fmtDate(d.lastUpdate) : '';
-  } else {
-    icon.textContent = '✅';
-    text.textContent = `🧠 Готово: ${d.done} проан., ${d.skipped} проп., ${d.errors} ош.`;
-    time.textContent = '';
-  }
+function _estimateEta(d) {
+  if (!d.startedAt || (d.done || 0) < 1) return '';
+  const start = new Date(d.startedAt).getTime();
+  const now = d.updatedAt ? new Date(d.updatedAt).getTime() : Date.now();
+  const elapsed = (now - start) / 1000;
+  const perItem = elapsed / d.done;
+  const remaining = ((d.total || 0) - (d.done || 0) - (d.skipped || 0) - (d.errors || 0)) * perItem;
+  if (remaining < 60) return `~${Math.round(remaining)}с`;
+  if (remaining < 3600) return `~${Math.round(remaining / 60)} мин`;
+  return `~${(remaining / 3600).toFixed(1)}ч`;
 }
 
-// Also check analyze-all status on page load
+// Also check analyze-all status on page load (legacy compat)
 async function checkAnalyzeAllStatus() {
-  try {
-    const data = await (await fetch('/api/analyze-all/status')).json();
-    S.analyzeAllRunning = data.running;
-    if (data.running) startAnalyzeAllPoll();
-  } catch(e) {}
+  await loadAnalysisStats();
 }
 
 // ─── START_BLOCK_AI_SUMMARIZE

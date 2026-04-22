@@ -36,6 +36,7 @@ from db import (
     gen_summary_upsert,
     gen_summary_delete,
 )
+from db import AnalysisState, get_analysis_state, update_analysis_state, get_analysis_counts
 from sync_worker import SyncWorker, sync_all_keys
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
@@ -1699,8 +1700,6 @@ _analyze_all = {
     "done": 0,
     "errors": 0,
     "skipped": 0,
-    "started_at": None,
-    "last_update": None,
     "stop_requested": False,
     "thread": None,
     "lock": threading.Lock(),
@@ -1792,84 +1791,166 @@ def _analyze_single_gen(gen_id: str) -> dict:
 
 
 def _analyze_all_worker():
-    """Background thread: analyze all generations without summary."""
-    print(f"[AnalyzeAll] started")
-    while True:
-        with _analyze_all["lock"]:
-            if _analyze_all["stop_requested"]:
-                _analyze_all["running"] = False
-                print("[AnalyzeAll] stopped by request")
-                return
-
-        dbs = get_session()
-        try:
-            # Find all generation IDs without summary
-            all_gen_ids = dbs.query(Generation.id).order_by(Generation.created_at_api.desc()).all()
-            all_ids = [row[0] for row in all_gen_ids]
-
-            # Filter out already-analyzed ones
-            cached_ids = set()
-            for i in range(0, len(all_ids), 500):
-                batch = all_ids[i:i + 500]
-                found = gen_summary_get_many(batch)
-                cached_ids.update(found.keys())
-
-            uncached = [gid for gid in all_ids if gid not in cached_ids]
-
+    """Background thread: analyze all generations without summary.
+    State persisted to DB (analysis_state table) — survives restarts."""
+    print(f"[AnalyzeAll] worker started")
+    try:
+        while True:
             with _analyze_all["lock"]:
-                _analyze_all["total"] = len(uncached)
+                if _analyze_all["stop_requested"]:
+                    update_analysis_state(status="paused")
+                    _analyze_all["running"] = False
+                    print("[AnalyzeAll] stopped by request")
+                    return
 
-            if not uncached:
+            dbs = get_session()
+            try:
+                # Find all generation IDs without summary
+                all_gen_ids = dbs.query(Generation.id).order_by(Generation.created_at_api.desc()).all()
+                all_ids = [row[0] for row in all_gen_ids]
+
+                # Filter out already-analyzed ones
+                cached_ids = set()
+                for i in range(0, len(all_ids), 500):
+                    batch = all_ids[i:i + 500]
+                    found = gen_summary_get_many(batch)
+                    cached_ids.update(found.keys())
+
+                uncached = [gid for gid in all_ids if gid not in cached_ids]
+
+                with _analyze_all["lock"]:
+                    _analyze_all["total"] = len(uncached)
+
+                # Persist to DB
+                update_analysis_state(
+                    status="running",
+                    total=len(all_ids),
+                    done=len(cached_ids),
+                    skipped=0,
+                    errors=_analyze_all["errors"],
+                )
+
+                if not uncached:
+                    update_analysis_state(
+                        status="completed",
+                        total=len(all_ids),
+                        done=len(cached_ids),
+                    )
+                    with _analyze_all["lock"]:
+                        _analyze_all["running"] = False
+                    print(f"[AnalyzeAll] done — all {len(all_ids)} generations analyzed")
+                    return
+
+                print(f"[AnalyzeAll] {len(uncached)} remaining (of {len(all_ids)} total)")
+
+                for gen_id in uncached:
+                    with _analyze_all["lock"]:
+                        if _analyze_all["stop_requested"]:
+                            update_analysis_state(status="paused")
+                            _analyze_all["running"] = False
+                            print("[AnalyzeAll] stopped mid-batch")
+                            return
+                        # Pause support
+                        while _analyze_all["paused"] and not _analyze_all["stop_requested"]:
+                            _analyze_all["lock"].release()
+                            update_analysis_state(status="paused")
+                            time.sleep(0.5)
+                            _analyze_all["lock"].acquire()
+                        if _analyze_all["stop_requested"]:
+                            update_analysis_state(status="paused")
+                            _analyze_all["running"] = False
+                            return
+
+                    result = _analyze_single_gen(gen_id)
+
+                    with _analyze_all["lock"]:
+                        if result["status"] == "ok":
+                            _analyze_all["done"] += 1
+                        elif result["status"] == "skipped":
+                            _analyze_all["skipped"] += 1
+                        else:
+                            _analyze_all["errors"] += 1
+
+                    # Persist progress every 5 records
+                    local_done = _analyze_all["done"]
+                    if local_done % 5 == 0:
+                        update_analysis_state(
+                            status="running",
+                            total=len(all_ids),
+                            done=local_done,
+                            skipped=_analyze_all["skipped"],
+                            errors=_analyze_all["errors"],
+                        )
+
+                    # Small delay between requests
+                    time.sleep(0.3)
+
+            except Exception as e:
+                update_analysis_state(status="error")
                 with _analyze_all["lock"]:
                     _analyze_all["running"] = False
-                    _analyze_all["last_update"] = datetime.now(timezone.utc).isoformat()
-                print(f"[AnalyzeAll] done — all generations already analyzed")
+                print(f"[AnalyzeAll] fatal error: {e}")
                 return
+            finally:
+                dbs.close()
+            break
 
-            print(f"[AnalyzeAll] {len(uncached)} generations to analyze (of {len(all_ids)} total)")
+        # Completed successfully
+        update_analysis_state(
+            status="completed",
+            total=_analyze_all["total"] + _analyze_all["done"],
+            done=_analyze_all["done"],
+            skipped=_analyze_all["skipped"],
+            errors=_analyze_all["errors"],
+            completed_at=datetime.now(timezone.utc),
+        )
+        with _analyze_all["lock"]:
+            _analyze_all["running"] = False
+        print(f"[AnalyzeAll] completed: done={_analyze_all['done']} skipped={_analyze_all['skipped']} errors={_analyze_all['errors']}")
+    except Exception as e:
+        print(f"[AnalyzeAll] unexpected error: {e}")
+        update_analysis_state(status="error")
+        with _analyze_all["lock"]:
+            _analyze_all["running"] = False
 
-            for gen_id in uncached:
-                with _analyze_all["lock"]:
-                    if _analyze_all["stop_requested"]:
-                        _analyze_all["running"] = False
-                        print("[AnalyzeAll] stopped mid-batch")
-                        return
-                    # Pause support: wait while paused
-                    while _analyze_all["paused"] and not _analyze_all["stop_requested"]:
-                        _analyze_all["lock"].release()
-                        time.sleep(0.5)
-                        _analyze_all["lock"].acquire()
-                    if _analyze_all["stop_requested"]:
-                        _analyze_all["running"] = False
-                        return
 
-                result = _analyze_single_gen(gen_id)
-
-                with _analyze_all["lock"]:
-                    if result["status"] == "ok":
-                        _analyze_all["done"] += 1
-                    elif result["status"] == "skipped":
-                        _analyze_all["skipped"] += 1
-                    else:
-                        _analyze_all["errors"] += 1
-                    _analyze_all["last_update"] = datetime.now(timezone.utc).isoformat()
-
-                # Small delay between requests (be polite to APIs)
-                time.sleep(0.3)
-
-        except Exception as e:
-            with _analyze_all["lock"]:
-                _analyze_all["running"] = False
-                _analyze_all["last_update"] = datetime.now(timezone.utc).isoformat()
-            print(f"[AnalyzeAll] fatal error: {e}")
-            return
-        finally:
-            dbs.close()
-        break
-
+@app.route("/api/analysis-stats")
+def api_analysis_stats():
+    """Always-available: total/analyzed/remaining counts + current job state."""
+    counts = get_analysis_counts()
+    state = get_analysis_state()
     with _analyze_all["lock"]:
-        _analyze_all["running"] = False
-    print(f"[AnalyzeAll] completed: done={_analyze_all['done']} skipped={_analyze_all['skipped']} errors={_analyze_all['errors']}")
+        # In-memory state overrides DB when actively running
+        if _analyze_all["running"]:
+            return jsonify({
+                "total": counts["total"],
+                "analyzed": counts["analyzed"],
+                "remaining": counts["remaining"],
+                "job": {
+                    "status": "paused" if _analyze_all["paused"] else "running",
+                    "done": _analyze_all["done"],
+                    "skipped": _analyze_all["skipped"],
+                    "total": _analyze_all["total"],
+                    "errors": _analyze_all["errors"],
+                    "startedAt": state.started_at.isoformat() if state.started_at else None,
+                    "updatedAt": datetime.now(timezone.utc).isoformat(),
+                }
+            })
+    return jsonify({
+        "total": counts["total"],
+        "analyzed": counts["analyzed"],
+        "remaining": counts["remaining"],
+        "job": {
+            "status": state.status,
+            "done": state.done or 0,
+            "skipped": state.skipped or 0,
+            "total": state.total or 0,
+            "errors": state.errors or 0,
+            "startedAt": state.started_at.isoformat() if state.started_at else None,
+            "updatedAt": state.updated_at.isoformat() if state.updated_at else None,
+            "completedAt": state.completed_at.isoformat() if state.completed_at else None,
+        }
+    })
 
 
 @app.route("/api/analyze-all/start", methods=["POST"])
@@ -1878,15 +1959,35 @@ def api_analyze_all_start():
     with _analyze_all["lock"]:
         if _analyze_all["running"]:
             return jsonify({"status": "already_running"})
+
+        # Check if there was a paused job — resume instead of restart
+        prev_state = get_analysis_state()
+        if prev_state.status == "paused" and (prev_state.done or 0) > 0:
+            print(f"[AnalyzeAll] resuming paused job (done={prev_state.done})")
+            _analyze_all["done"] = 0  # will recount from DB
+            _analyze_all["skipped"] = 0
+            _analyze_all["errors"] = prev_state.errors or 0
+            _analyze_all["total"] = 0
+        else:
+            _analyze_all["done"] = 0
+            _analyze_all["skipped"] = 0
+            _analyze_all["total"] = 0
+            _analyze_all["errors"] = 0
+
         _analyze_all["running"] = True
         _analyze_all["paused"] = False
-        _analyze_all["done"] = 0
-        _analyze_all["skipped"] = 0
-        _analyze_all["total"] = 0
-        _analyze_all["errors"] = 0
         _analyze_all["stop_requested"] = False
-        _analyze_all["started_at"] = datetime.now(timezone.utc).isoformat()
-        _analyze_all["last_update"] = _analyze_all["started_at"]
+
+        # Persist start
+        update_analysis_state(
+            status="running",
+            done=0,
+            skipped=0,
+            errors=0,
+            total=0,
+            started_at=datetime.now(timezone.utc),
+            completed_at=None,
+        )
 
         t = threading.Thread(target=_analyze_all_worker, daemon=True)
         _analyze_all["thread"] = t
@@ -1899,27 +2000,50 @@ def api_analyze_all_start():
 
 @app.route("/api/analyze-all/status")
 def api_analyze_all_status():
-    """Poll analyze-all progress."""
+    """Poll analyze-all progress — returns DB-persisted + in-memory state."""
+    counts = get_analysis_counts()
     with _analyze_all["lock"]:
+        running = _analyze_all["running"]
+        paused = _analyze_all["paused"]
+        state = get_analysis_state()
         return jsonify({
-            "running": _analyze_all["running"],
-            "paused": _analyze_all["paused"],
-            "done": _analyze_all["done"],
-            "skipped": _analyze_all["skipped"],
-            "total": _analyze_all["total"],
-            "errors": _analyze_all["errors"],
-            "startedAt": _analyze_all["started_at"],
-            "lastUpdate": _analyze_all["last_update"],
+            "running": running,
+            "paused": paused,
+            "done": _analyze_all["done"] if running else (state.done or 0),
+            "skipped": _analyze_all["skipped"] if running else (state.skipped or 0),
+            "total": _analyze_all["total"] if running else (state.total or 0),
+            "errors": _analyze_all["errors"] if running else (state.errors or 0),
+            "startedAt": state.started_at.isoformat() if state.started_at else None,
+            "lastUpdate": state.updated_at.isoformat() if state.updated_at else None,
+            "status": state.status,
+            # Always-available counts
+            "dbTotal": counts["total"],
+            "dbAnalyzed": counts["analyzed"],
+            "dbRemaining": counts["remaining"],
         })
 
 
 @app.route("/api/analyze-all/stop", methods=["POST"])
 def api_analyze_all_stop():
-    """Request analyze-all to stop."""
+    """Pause analyze-all (stop after current item, can resume)."""
     with _analyze_all["lock"]:
         _analyze_all["stop_requested"] = True
         _analyze_all["paused"] = False  # unpause so it can see stop flag
-    return jsonify({"status": "stopping"})
+    update_analysis_state(status="paused")
+    return jsonify({"status": "paused"})
+
+
+@app.route("/api/analyze-all/pause", methods=["POST"])
+def api_analyze_all_pause():
+    """Pause/resume analyze-all."""
+    with _analyze_all["lock"]:
+        if not _analyze_all["running"]:
+            return jsonify({"error": "not running"}), 400
+        _analyze_all["paused"] = not _analyze_all["paused"]
+        state_label = "paused" if _analyze_all["paused"] else "resumed"
+    update_analysis_state(status=state_label)
+    print(f"[AnalyzeAll] {state_label}")
+    return jsonify({"status": state_label})
 
 
 @app.route("/api/analyze-all/pause", methods=["POST"])
@@ -2156,6 +2280,27 @@ def main():
     # Init DB
     init_db()
     print("✅ PostgreSQL connected")
+
+    # Resume analyze-all if was running/paused before restart
+    try:
+        prev = get_analysis_state()
+        counts = get_analysis_counts()
+        print(f"📊 Analysis: {counts['analyzed']}/{counts['total']} analyzed, {counts['remaining']} remaining")
+        if prev.status in ("running", "paused") and counts["remaining"] > 0:
+            print(f"🔄 Resuming analyze-all (was {prev.status}, {counts['remaining']} remaining)")
+            with _analyze_all["lock"]:
+                _analyze_all["running"] = True
+                _analyze_all["paused"] = prev.status == "paused"
+                _analyze_all["done"] = 0  # will recount from DB
+                _analyze_all["errors"] = prev.errors or 0
+                _analyze_all["total"] = 0
+                _analyze_all["stop_requested"] = False
+                update_analysis_state(status="running")
+                t = threading.Thread(target=_analyze_all_worker, daemon=True)
+                _analyze_all["thread"] = t
+                t.start()
+    except Exception as e:
+        print(f"⚠️ Resume analyze-all failed: {e}")
 
     # Init Qdrant
     if QDRANT_ENABLED:

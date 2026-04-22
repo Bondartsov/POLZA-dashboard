@@ -41,7 +41,12 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .btn-analyze-all{padding:5px 12px;font-size:12px;font-weight:600;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer;white-space:nowrap;transition:all .15s}
 .btn-analyze-all:hover{background:var(--accent2);border-color:var(--accent2)}
 .btn-analyze-all:disabled{opacity:.6;cursor:default}
-.analyze-all-indicator{display:flex;align-items:center;gap:6px;font-size:11px;background:var(--bg3);border:1px solid var(--accent);border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap;animation:pulse-subtle 2s infinite}
+.analysis-stats{display:flex;align-items:center;gap:6px;font-size:11px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:4px 10px;cursor:pointer;white-space:nowrap;font-weight:600}
+.analysis-stats:hover{border-color:var(--accent)}
+.analysis-stats.active{border-color:var(--accent);animation:pulse-subtle 2s infinite}
+.analysis-stats .stats-pct{color:var(--accent);font-weight:700}
+.analysis-stats .stats-remaining{color:var(--yellow)}
+.analysis-stats .stats-done{color:var(--green)}
 @keyframes pulse-subtle{0%,100%{opacity:1}50%{opacity:.7}}
 .sidebar-toggle{background:var(--bg3);border:1px solid var(--border);color:var(--text2);width:32px;height:32px;border-radius:6px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center}
 .sidebar-toggle:hover{background:var(--accent);color:#fff}

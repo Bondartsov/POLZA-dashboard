@@ -386,3 +386,66 @@ def gen_summary_delete(generation_id: str):
         s.close()
 
 # ─── END_BLOCK_GEN_SUMMARY_CRUD
+
+
+# ─── START_BLOCK_ANALYSIS_STATE
+# Persistent state for analyze-all background job (survives restarts)
+
+class AnalysisState(Base):
+    """Singleton row: tracks analyze-all progress. Survives server restart."""
+    __tablename__ = "analysis_state"
+
+    id = Column(Integer, primary_key=True, default=1)  # always id=1
+    status = Column(String(20), default="idle")  # idle | running | paused | completed | error
+    total = Column(Integer, default=0)
+    done = Column(Integer, default=0)
+    skipped = Column(Integer, default=0)
+    errors = Column(Integer, default=0)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+def get_analysis_state():
+    """Get or create the singleton analysis state row."""
+    s = get_session()
+    try:
+        row = s.query(AnalysisState).filter(AnalysisState.id == 1).first()
+        if not row:
+            row = AnalysisState(id=1, status="idle")
+            s.add(row)
+            s.commit()
+        return row
+    finally:
+        s.close()
+
+def update_analysis_state(**kwargs):
+    """Update analysis state fields atomically."""
+    s = get_session()
+    try:
+        row = s.query(AnalysisState).filter(AnalysisState.id == 1).first()
+        if not row:
+            row = AnalysisState(id=1)
+            s.add(row)
+        for k, v in kwargs.items():
+            setattr(row, k, v)
+        row.updated_at = datetime.utcnow()
+        s.commit()
+        return row
+    except Exception as e:
+        s.rollback()
+        print(f"[AnalysisState] update error: {e}")
+        raise
+    finally:
+        s.close()
+
+def get_analysis_counts():
+    """Return {total, analyzed, remaining} counts from DB."""
+    s = get_session()
+    try:
+        total = s.query(Generation).count()
+        analyzed = s.query(GenerationSummary).count()
+        return {"total": total, "analyzed": analyzed, "remaining": max(0, total - analyzed)}
+    finally:
+        s.close()
+
+# ─── END_BLOCK_ANALYSIS_STATE
