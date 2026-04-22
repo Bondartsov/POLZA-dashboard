@@ -2151,6 +2151,7 @@ def main():
     else:
         print(f"   Anthropic: url={LLM_API_URL}, model={LLM_MODEL}, key={'✅' if LLM_API_KEY else '❌'}")
     print(f"📦 Qdrant: {QDRANT_URL}/{QDRANT_COLLECTION} ({'enabled' if QDRANT_ENABLED else 'disabled'})")
+    print(f"🔄 Auto-analyze: {'ON' if auto_analyze_env else 'OFF'} (AUTO_ANALYZE env)")
 
     # Init DB
     init_db()
