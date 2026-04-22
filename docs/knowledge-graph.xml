@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 3.4.0 -->
+<!-- VERSION: 3.5.0 -->
 <!-- CHANGELOG:
+       3.5.0 (2026-04-22): Phase-4b "Persistent Analyze-All + Auto-Analyze".
+                           New modules: M-ANALYSIS-STATE, M-AUTO-ANALYZE.
+                           Updated M-LLM-GEN-SUMMARIZE for persistent analyze-all with DB-backed state.
+                           Updated M-SYNC with on_new_records callback for auto-analyze.
+                           Updated M-STATIC with configurable refresh interval, visual analysis status,
+                           persistent stats counter, auto-resume on page load.
+                           Fixed: Generation.created_at → created_at_api in _analyze_all_worker.
        3.4.0 (2026-04-22): Added Phase-4 "Qwen On-Prem + Vector Embeddings".
                            New modules: M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT, M-PROVIDER-UI.
                            Updated M-LLM-GEN-SUMMARIZE for parallel LLM+embed and dual store.
@@ -16,12 +23,12 @@
        3.1.0: Session summaries, 95-chunk SocratiCode index.
 -->
 
-<KnowledgeGraph project="polza-dashboard" version="3.4.0">
+<KnowledgeGraph project="polza-dashboard" version="3.5.0">
 
   <M-APP NAME="Flask App" TYPE="ENTRY_POINT">
     <purpose>Flask web-server v3: DB-backed API + proxy for detail/log + background backfill + per-generation AI summarize</purpose>
     <path>polza_dashboard.py</path>
-    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-ANOMALY, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-ANTHROPIC, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT</depends>
+    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-ANOMALY, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-ANTHROPIC, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT, M-ANALYSIS-STATE, M-AUTO-ANALYZE</depends>
     <annotations>
       <fn-index PURPOSE="Serve index.html" />
       <fn-config PURPOSE="Auth config + keys from DB + sync status" />
@@ -38,8 +45,13 @@
       <fn-gen_summaries_batch PURPOSE="POST /api/generation-summaries — batch prefetch cached summaries by ID list" />
       <fn-gen_summary_delete PURPOSE="DELETE /api/generation/summary — drop cache, force regeneration" />
       <fn-session_summarize PURPOSE="POST /api/session/summarize — session-level summary (only when session_id exists)" />
-      <fn-provider_config PURPOSE="GET /api/provider/config — returns current provider, available providers with model/cost info" />
-      <fn-provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama}. Switches _provider_state at runtime" />
+      <fn-provider_config PURPOSE="GET /api/provider/config — returns current provider, available providers with model/cost info, autoAnalyze state" />
+      <fn-provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama, autoAnalyze?: bool}. Switches _provider_state at runtime" />
+      <fn-analysis_stats PURPOSE="GET /api/analysis-stats — always-available endpoint: total/analyzed/remaining counts + current job state from DB" />
+      <fn-analyze_all_start PURPOSE="POST /api/analyze-all/start — starts or resumes analyze-all job. State persisted to analysis_state table." />
+      <fn-analyze_all_status PURPOSE="GET /api/analyze-all/status — returns DB-backed + in-memory state" />
+      <fn-analyze_all_stop PURPOSE="POST /api/analyze-all/stop — pauses job (resume-capable). Updates analysis_state to paused." />
+      <fn-analyze_all_pause PURPOSE="POST /api/analyze-all/pause — toggle pause/resume on running job" />
     </annotations>
   </M-APP>
 
@@ -58,15 +70,16 @@
   </M-DB>
 
   <M-SYNC NAME="Sync Worker" TYPE="CORE_LOGIC">
-    <purpose>Background thread: incremental sync every 5 min from Polza.AI API to PostgreSQL. Enriches session_id/device_id from metadata.externalUserId on sync</purpose>
+    <purpose>Background thread: incremental sync every 5 min from Polza.AI API to PostgreSQL. Enriches session_id/device_id from metadata.externalUserId on sync. Returns new_ids and calls on_new_records callback for auto-analyze integration.</purpose>
     <path>sync_worker.py</path>
     <depends>M-DB</depends>
     <annotations>
-      <fn-sync_key PURPOSE="Sync single key — fetches only new records since last_sync_at" />
-      <fn-sync_all PURPOSE="Sync all registered keys sequentially" />
+      <fn-sync_key PURPOSE="Sync single key — fetches only new records since last_sync_at. Returns (count, new_ids, error)." />
+      <fn-sync_all PURPOSE="Sync all registered keys sequentially. Returns (results_list, all_new_ids)." />
       <fn-upsert PURPOSE="INSERT ON CONFLICT UPDATE — dedup by generation id" />
       <fn-trigger PURPOSE="Manual trigger for immediate sync" />
       <fn-enrich_session PURPOSE="Parse metadata.externalUserId JSON → session_id + device_id for synced records" />
+      <fn-on_new_records PURPOSE="Optional callback(new_ids) called after each sync cycle. Set by main() for auto-analyze integration." />
       <constraint-buffer>SYNC_BUFFER=2min overlap to catch boundary records</constraint-buffer>
     </annotations>
   </M-SYNC>
@@ -115,7 +128,10 @@
       <fn-load_provider_config PURPOSE="GET /api/provider/config on page load — populate radio state and provider info labels" />
       <fn-set_provider PURPOSE="POST /api/provider/set on radio click — switch runtime LLM provider, update UI" />
       <fn-detail PURPOSE="Modal with full log — backend resolves token. Now embeds M-LLM-GEN-SUMMARIZE results on top." />
-      <fn-autorefresh PURPOSE="Auto-refresh every 60s — reads from DB (fast)" />
+      <fn-autorefresh PURPOSE="Auto-refresh with configurable interval (10s/30s/60s/2min/5min dropdown in sidebar)" />
+      <fn-analysis_stats PURPOSE="Persistent analysis stats counter in topbar — always visible, shows analyzed/total/remaining. Loads from /api/analysis-stats on every page load. Auto-resumes polling if job was active." />
+      <fn-analyze_all PURPOSE="Persistent analyze-all: start/stop(pause)/resume. State in DB survives restart. Progress banner with ETA, pause/resume/stop controls." />
+      <fn-analysis_status_cells PURPOSE="Visual analysis status in AI column: 🔄 В очереди (yellow, analyze-all running) / ⏳ Ожидает (blue, auto-analyze ON) / 🧠 (grey, not analyzed) / ✅ topic (green, analyzed)" />
       <fn-backfill_ui PURPOSE="Topbar indicator: ⏳/✅/❌ status, polling every 2s, start/stop/retry buttons" />
       <fn-key_filter PURPOSE="Dropdown filter by API key name" />
       <fn-theme PURPOSE="Dark/light theme toggle with localStorage" />
@@ -295,6 +311,33 @@
     </annotations>
   </M-PROVIDER-UI>
 
+  <M-ANALYSIS-STATE NAME="Analysis State Persistence" TYPE="DATA_LAYER">
+    <purpose>Singleton DB row (analysis_state table) that persists analyze-all job progress. Survives server restarts and page refreshes.</purpose>
+    <path>db.py</path>
+    <depends>M-DB</depends>
+    <annotations>
+      <m-analysis_state PURPOSE="ORM model: id=1 PK, status (idle|running|paused|completed|error), total, done, skipped, errors, started_at, updated_at, completed_at" />
+      <fn-get_analysis_state PURPOSE="Get or create singleton row (id=1)" />
+      <fn-update_analysis_state PURPOSE="Update job progress fields atomically" />
+      <fn-get_analysis_counts PURPOSE="Return {total, analyzed, remaining} counts from Generation + GenerationSummary tables" />
+      <constraint-singleton>Always id=1 — single row tracks one global analyze-all job</constraint-singleton>
+      <block-marker>START_BLOCK_ANALYSIS_STATE</block-marker>
+    </annotations>
+  </M-ANALYSIS-STATE>
+
+  <M-AUTO-ANALYZE NAME="Auto-Analyze Callback" TYPE="CORE_LOGIC">
+    <purpose>SyncWorker callback that auto-analyzes new records after each sync cycle when toggle is ON. Runs in sync worker thread.</purpose>
+    <path>polza_dashboard.py</path>
+    <depends>M-SYNC, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT, M-GEN-SUMMARY-STORE</depends>
+    <annotations>
+      <fn-_auto_analyze_new_records PURPOSE="Callback: receives new_gen_ids from SyncWorker, filters already-analyzed, calls _analyze_single_gen for each" />
+      <config-AUTO_ANALYZE PURPOSE="Env toggle AUTO_ANALYZE=true|false. Also switchable at runtime via /api/provider/set {autoAnalyze: bool}" />
+      <constraint-sync_callback>on_new_records callback set in main() after SyncWorker init. Runs in sync thread — must not block excessively.</constraint-sync_callback>
+      <constraint-skip_if_running>Skips if analyze-all is already running to avoid double-processing</constraint-skip_if_running>
+      <log-prefix>[AutoAnalyze]</log-prefix>
+    </annotations>
+  </M-AUTO-ANALYZE>
+
   <Constraints>
     <constraint-sort>Polza.AI API supports only sortBy=createdAt|clientCost; DB supports all columns</constraint-sort>
     <constraint-cache>cached_tokens in prompt_tokens_details = cache READ (hit); prompt_tokens - cached = cache WRITE (miss)</constraint-cache>
@@ -314,6 +357,9 @@
     <constraint-qdrant_separate>polza-qdrant container on port 6335 is separate from socraticode-qdrant. Collection: Polza_user_logs, 768-dim cosine.</constraint-qdrant_separate>
     <constraint-embedding_parallel>_embed_text runs in ThreadPoolExecutor parallel with LLM call. Embedding failure is non-fatal — PostgreSQL storage succeeds independently.</constraint-embedding_parallel>
     <constraint-provider_runtime>Provider switch via POST /api/provider/set takes effect immediately on next _llm_call_summarize. No server restart needed.</constraint-provider_runtime>
+    <constraint-analysis_persistent>Analyze-all state persisted in analysis_state table. Stop = pause (resume-capable). Server restart auto-resumes if was running/paused. Frontend auto-resumes polling on page load.</constraint-analysis_persistent>
+    <constraint-auto_analyze>AUTO_ANALYZE env toggle + runtime /api/provider/set {autoAnalyze: bool}. SyncWorker.on_new_records callback triggers _analyze_single_gen for each new record after sync.</constraint-auto_analyze>
+    <constraint-refresh_interval>Frontend auto-refresh interval configurable: 10s/30s/60s/2min/5min dropdown in sidebar. Stored in JS state S.refreshInterval.</constraint-refresh_interval>
   </Constraints>
 
 </KnowledgeGraph>

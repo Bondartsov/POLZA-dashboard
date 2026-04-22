@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<DevelopmentPlan VERSION="0.4.0">
+<DevelopmentPlan VERSION="0.5.0">
   <!-- CHANGELOG:
+         0.5.0 (2026-04-22): Phase-4b "Persistent Analyze-All + Auto-Analyze".
+                             New modules: M-ANALYSIS-STATE, M-AUTO-ANALYZE.
+                             Updated: M-SYNC (new_ids tracking + callback), M-STATIC (configurable refresh,
+                             persistent stats counter, visual analysis status icons, auto-resume polling),
+                             M-APP (analysis-stats endpoint, DB-backed analyze-all state, resume on startup).
+                             Fixed: Generation.created_at → created_at_api.
          0.4.0 (2026-04-22): Added Phase-4 "Qwen On-Prem + Vector Embeddings".
                              New modules: M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT, M-PROVIDER-UI.
                              Updated modules: M-LLM-GEN-SUMMARIZE (parallel LLM+embed), M-APP (provider endpoints),
@@ -478,6 +484,26 @@
       <evidence>[GenSummarize][LLM] ok + [Embedding] dim=768 + [Qdrant][upsert] + [GenSummaryStore][upsert]</evidence>
     </DF-009>
 
+    <DF-010 NAME="Persistent Analyze-All" TRIGGER="User clicks '🧠 Анализ всех' button OR server resumes from DB state">
+      <step-1>POST /api/analyze-all/start — sets analysis_state status=running, starts background thread</step-1>
+      <step-2>Worker queries Generation.created_at_api desc, filters cached via gen_summary_get_many</step-2>
+      <step-3>For each uncached: _analyze_single_gen (LLM + embed + dual store), update analysis_state every 5 records</step-3>
+      <step-4>GET /api/analysis-stats returns live {total, analyzed, remaining, job: {status, done, errors, startedAt}}</step-4>
+      <step-5>Frontend polls every 2s — renders stats counter, progress banner with ETA, pause/resume/stop buttons</step-5>
+      <step-6>Stop → analysis_state.status=paused. Start again → detects paused state, resumes from where left off</step-6>
+      <step-7>Server restart → main() reads analysis_state, if status=running|paused → auto-resume background thread</step-7>
+      <evidence>[AnalyzeAll] N remaining (of M total) + [AnalysisState] update + GET /api/analysis-stats 200</evidence>
+    </DF-010>
+
+    <DF-011 NAME="Auto-Analyze on Sync" TRIGGER="SyncWorker completes sync cycle with new records AND auto_analyze toggle is ON">
+      <step-1>SyncWorker._do_sync() calls sync_all_keys() → returns (results, new_ids)</step-1>
+      <step-2>If new_ids not empty AND self.on_new_records callback set → callback(new_ids)</step-2>
+      <step-3>_auto_analyze_new_records: check _provider_state.auto_analyze, check analyze-all not already running</step-3>
+      <step-4>Filter already-analyzed via gen_summary_get_many, call _analyze_single_gen for each uncached</step-4>
+      <step-5>Each record: LLM + embed + dual store (PostgreSQL + Qdrant). 0.5s delay between calls.</step-5>
+      <evidence>[AutoAnalyze] N new records to auto-analyze + [AutoAnalyze] ✅ gen_id...</evidence>
+    </DF-011>
+
   </DataFlow>
 
   <ImplementationOrder>
@@ -515,6 +541,16 @@
       <step-6 module="M-APP" status="updated">New endpoints: GET /api/provider/config, POST /api/provider/set. New env vars: LLM_PROVIDER, OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL, OLLAMA_THINKING, OLLAMA_TIMEOUT, QDRANT_URL, QDRANT_COLLECTION, QDRANT_ENABLED</step-6>
       <step-7 module="M-STATIC" status="updated">Provider toggle in sidebar, updated renderAiSection with provider label and vector badge</step-7>
     </Phase-4>
+
+    <Phase-4b name="Persistent Analyze-All + Auto-Analyze + UX Polish" status="done">
+      <goal>Make analyze-all persistent (survives restart), implement auto-analyze for new records, configurable refresh interval, visual analysis status indicators, always-visible stats counter</goal>
+      <step-1 module="M-ANALYSIS-STATE" status="done" verification="V-M-ANALYSIS-STATE">AnalysisState singleton table in DB — persists analyze-all job progress (status, total, done, errors, timestamps)</step-1>
+      <step-2 module="M-SYNC" status="updated">sync_key returns (count, new_ids, error). SyncWorker.on_new_records callback for auto-analyze. sync_all_keys returns (results, all_new_ids).</step-2>
+      <step-3 module="M-AUTO-ANALYZE" status="done" verification="V-M-AUTO-ANALYZE">Auto-analyze callback: SyncWorker → _auto_analyze_new_records → filters cached → _analyze_single_gen for each. Toggle via AUTO_ANALYZE env + /api/provider/set.</step-3>
+      <step-4 module="M-APP" status="updated">GET /api/analysis-stats (always-available counts + job state). Analyze-all state persisted to DB. Server startup auto-resumes. Stop = pause.</step-4>
+      <step-5 module="M-STATIC" status="updated">Configurable refresh interval (10s-5min dropdown). Persistent stats counter in topbar. Visual status: 🔄 В очереди / ⏳ Ожидает / 🧠 / ✅. Auto-resume polling on page load.</step-5>
+      <step-6 module="M-DB" status="updated">New AnalysisState model + get_analysis_state, update_analysis_state, get_analysis_counts helpers. New analysis_state table.</step-6>
+    </Phase-4b>
 
   </ImplementationOrder>
 

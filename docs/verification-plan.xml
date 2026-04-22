@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<VerificationPlan VERSION="0.4.0">
+<VerificationPlan VERSION="0.5.0">
   <!-- CHANGELOG:
+         0.5.0 (2026-04-22): Phase-4b "Persistent Analyze-All + Auto-Analyze".
+                             New module checks: V-M-ANALYSIS-STATE, V-M-AUTO-ANALYZE.
+                             New critical flows: VF-010 (persistent analyze-all), VF-011 (auto-analyze on sync).
+                             Added Gate-Phase-4b.
          0.4.0 (2026-04-22): Added Phase-4 "Qwen On-Prem + Vector Embeddings" verification.
                              New module checks: V-M-LLM-PROVIDER, V-M-EMBEDDING, V-M-QDRANT, V-M-PROVIDER-UI.
                              New critical flows: VF-008 (provider toggle), VF-009 (parallel summarize+embed).
@@ -113,6 +117,36 @@
         <log-marker>[GenSummaryStore][upsert] cached generation_id=...</log-marker>
       </required-signals>
     </VF-009>
+
+    <VF-010 NAME="Persistent analyze-all survives restart" USE_CASES="UC-002" DATA_FLOW="DF-010" PRIORITY="high">
+      <scenario>User clicks '🧠 Анализ всех' → progress shows → user refreshes page → progress still visible → server restarts → analysis auto-resumes</scenario>
+      <expected-outcome>
+        GET /api/analysis-stats returns {total, analyzed, remaining, job: {status, done, startedAt}}.
+        During analysis: job.status=running, remaining decreases.
+        After page refresh: stats counter still visible, polling resumes.
+        After server restart: 🔄 Resuming analyze-all in log, job continues from where stopped.
+        Stop button pauses (not kills) — start button resumes.
+      </expected-outcome>
+      <required-signals>
+        <log-marker>[AnalyzeAll] N remaining (of M total)</log-marker>
+        <log-marker>🔄 Resuming analyze-all (was paused/running, N remaining)</log-marker>
+        <log-marker>[AnalysisState] update</log-marker>
+      </required-signals>
+    </VF-010>
+
+    <VF-011 NAME="Auto-analyze triggers on new records" USE_CASES="UC-002" DATA_FLOW="DF-011" PRIORITY="high">
+      <scenario>AUTO_ANALYZE=true in .env. SyncWorker syncs new records. Auto-analyze callback processes them.</scenario>
+      <expected-outcome>
+        After sync: [AutoAnalyze] N new records to auto-analyze in log.
+        Each new record gets LLM summary + Qdrant vector.
+        Toggle OFF → no auto-analyze after sync.
+        Toggle ON at runtime via /api/provider/set → works on next sync.
+      </expected-outcome>
+      <required-signals>
+        <log-marker>[AutoAnalyze] N new records to auto-analyze</log-marker>
+        <log-marker>[AutoAnalyze] ✅ gen_id...</log-marker>
+      </required-signals>
+    </VF-011>
 
   </CriticalFlows>
 
@@ -268,6 +302,38 @@
       </scenarios>
     </V-M-PROVIDER-UI>
 
+    <V-M-ANALYSIS-STATE MODULE="M-ANALYSIS-STATE" PRIORITY="high">
+      <module-checks>
+        <check-1>curl -s http://localhost:5000/api/analysis-stats | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'total' in d; assert 'analyzed' in d; assert 'remaining' in d; assert 'job' in d"</check-1>
+        <check-2>PGPASSWORD=bond psql -h localhost -U dbadmin -d polza_dashboard -c "\d analysis_state"</check-2>
+        <check-3>PGPASSWORD=bond psql -h localhost -U dbadmin -d polza_dashboard -c "SELECT id, status, total, done FROM analysis_state WHERE id=1;"</check-3>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">analysis_state table exists with singleton row (id=1)</scenario-1>
+        <scenario-2 kind="success">GET /api/analysis-stats returns counts matching actual GenerationSummary count</scenario-2>
+        <scenario-3 kind="success">After analyze-all start, status changes to 'running'; after stop, to 'paused'</scenario-3>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>[AnalysisState] update</marker-1>
+      </required-log-markers>
+    </V-M-ANALYSIS-STATE>
+
+    <V-M-AUTO-ANALYZE MODULE="M-AUTO-ANALYZE" PRIORITY="high">
+      <module-checks>
+        <check-1>curl -s -X POST http://localhost:5000/api/provider/set -H "Content-Type: application/json" -d '{"autoAnalyze":true}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('autoAnalyze')==True"</check-1>
+        <check-2>grep "AutoAnalyze" /home/user/POLZA/dashboard.log | tail -5</check-2>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">New records synced → [AutoAnalyze] N new records to auto-analyze in log</scenario-1>
+        <scenario-2 kind="success">autoAnalyze OFF → no auto-analyze after sync</scenario-2>
+        <scenario-3 kind="success">Toggle ON at runtime → next sync triggers auto-analyze</scenario-3>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>[AutoAnalyze] N new records</marker-1>
+        <marker-2>[AutoAnalyze] ✅ gen_id</marker-2>
+      </required-log-markers>
+    </V-M-AUTO-ANALYZE>
+
     <V-M-SESSION-SUMMARIZER MODULE="M-SESSION-SUMMARIZER" PRIORITY="high">
       <test-files>
         <file>tests/test_summarizer.py</file>
@@ -391,6 +457,28 @@
         <evidence-8>Log shows parallel execution: [GenSummarize][LLM] ok + [Embedding] dim=768 + [Qdrant][upsert] in same request</evidence-8>
       </required-evidence>
     </Gate-Phase-4>
+
+    <Gate-Phase-4b PHASE="Phase-4b" STATUS="done">
+      <goal>Persistent analyze-all with DB state, auto-analyze on sync, configurable refresh interval, visual analysis status, always-visible stats counter</goal>
+      <commands>
+        <command-1>curl -s http://localhost:5000/api/analysis-stats | python3 -m json.tool</command-1>
+        <command-2>curl -s -X POST http://localhost:5000/api/analyze-all/start | python3 -m json.tool</command-1>
+        <command-3>sleep 5 && curl -s http://localhost:5000/api/analysis-stats | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['job']['status'] in ('running','paused')"</command-3>
+        <command-4>curl -s -X POST http://localhost:5000/api/analyze-all/stop | python3 -m json.tool</command-4>
+        <command-5>curl -s http://localhost:5000/api/analysis-stats | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['job']['status']=='paused'"</command-5>
+        <command-6>PGPASSWORD=bond psql -h localhost -U dbadmin -d polza_dashboard -c "SELECT status, done, total FROM analysis_state WHERE id=1;"</command-6>
+      </commands>
+      <required-evidence>
+        <evidence-1>/api/analysis-stats returns non-zero total, analyzed, remaining counts</evidence-1>
+        <evidence-2>Analyze-all starts, progress visible in /api/analysis-stats</evidence-2>
+        <evidence-3>Stop pauses job (status=paused in DB), not kills</evidence-3>
+        <evidence-4>Start after pause resumes (doesn't restart from zero)</evidence-4>
+        <evidence-5>Server restart auto-resumes: 🔄 Resuming analyze-all in log</evidence-5>
+        <evidence-6>Auto-analyze triggers on new records when toggle ON</evidence-6>
+        <evidence-7>UI: stats counter always visible in topbar, refresh interval dropdown in sidebar</evidence-7>
+        <evidence-8>UI: AI column shows 🔄/⏳/🧠/✅ status icons</evidence-8>
+      </required-evidence>
+    </Gate-Phase-4b>
 
   </PhaseGates>
 
