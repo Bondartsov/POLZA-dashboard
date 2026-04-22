@@ -1685,6 +1685,226 @@ def api_generation_summary_delete():
         return jsonify({"error": str(e)}), 500
 
 
+# ─── Analyze ALL generations (background) ─────────────────────────────────────
+
+_analyze_all = {
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "errors": 0,
+    "skipped": 0,
+    "started_at": None,
+    "last_update": None,
+    "stop_requested": False,
+    "thread": None,
+    "lock": threading.Lock(),
+}
+
+
+def _analyze_single_gen(gen_id: str) -> dict:
+    """Analyze one generation: fetch log → LLM + embed → store. Returns status."""
+    # Check cache first
+    cached = gen_summary_get_or_none(gen_id)
+    if cached:
+        return {"status": "skipped"}
+
+    try:
+        token = _resolve_token_for_gen(gen_id)
+        r = http_requests.get(
+            f"{POLZA_API}/history/generations/{gen_id}/log",
+            headers=_headers(token), timeout=30,
+        )
+        if r.status_code != 200:
+            return {"status": "error", "detail": f"HTTP {r.status_code}"}
+
+        total_text = _extract_user_text_from_log(r.json(), limit_chars=4000)
+        if not total_text:
+            return {"status": "skipped", "detail": "empty text"}
+
+        # Parallel: LLM + embed
+        llm_result = [None, None]
+        embed_result = [None]
+
+        def _run_llm():
+            llm_result[0], llm_result[1] = _llm_call_summarize(total_text)
+
+        def _run_embed():
+            embed_result[0] = _embed_text(total_text)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            llm_future = pool.submit(_run_llm)
+            embed_future = pool.submit(_run_embed)
+            llm_future.result(timeout=OLLAMA_TIMEOUT if _provider_state["provider"] == "ollama" else 45)
+            embed_future.result(timeout=30)
+
+        parsed, usage = llm_result
+
+        # Store in PostgreSQL
+        try:
+            gen_summary_upsert(
+                generation_id=gen_id,
+                summary=parsed.get("summary", ""),
+                topic=parsed.get("topic", ""),
+                is_work=parsed.get("is_work", True),
+                project_guess=parsed.get("project_guess"),
+                risk_flags=parsed.get("risk_flags", []),
+                llm_model=usage.get("model", ""),
+                llm_cost=usage["cost_usd"],
+                cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
+                cache_read_tokens=usage.get("cache_read_input_tokens", 0),
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+            )
+        except Exception as e:
+            print(f"[AnalyzeAll][cache_store] non-fatal: {e}")
+
+        # Store vector in Qdrant
+        if embed_result[0]:
+            dbs = get_session()
+            gen_meta = None
+            try:
+                gen_obj = dbs.query(Generation).get(gen_id)
+                if gen_obj:
+                    gen_meta = gen_obj.to_dict()
+            finally:
+                dbs.close()
+            qdrant_payload = {
+                "generation_id": gen_id,
+                "user_text_snippet": total_text[:200],
+                "topic": parsed.get("topic", ""),
+                "is_work": parsed.get("is_work", True),
+                "session_id": gen_meta.get("session_id", "") if gen_meta else "",
+                "api_key_name": gen_meta.get("sourceKeyName", "") if gen_meta else "",
+                "model_used": gen_meta.get("modelDisplayName", "") if gen_meta else "",
+                "created_at": gen_meta.get("createdAt", "") if gen_meta else "",
+            }
+            _qdrant_upsert(gen_id, embed_result[0], qdrant_payload)
+
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+def _analyze_all_worker():
+    """Background thread: analyze all generations without summary."""
+    print(f"[AnalyzeAll] started")
+    while True:
+        with _analyze_all["lock"]:
+            if _analyze_all["stop_requested"]:
+                _analyze_all["running"] = False
+                print("[AnalyzeAll] stopped by request")
+                return
+
+        dbs = get_session()
+        try:
+            # Find all generation IDs without summary
+            all_gen_ids = dbs.query(Generation.id).order_by(Generation.created_at.desc()).all()
+            all_ids = [row[0] for row in all_gen_ids]
+
+            # Filter out already-analyzed ones
+            cached_ids = set()
+            for i in range(0, len(all_ids), 500):
+                batch = all_ids[i:i + 500]
+                found = gen_summary_get_many(batch)
+                cached_ids.update(found.keys())
+
+            uncached = [gid for gid in all_ids if gid not in cached_ids]
+
+            with _analyze_all["lock"]:
+                _analyze_all["total"] = len(uncached)
+
+            if not uncached:
+                with _analyze_all["lock"]:
+                    _analyze_all["running"] = False
+                    _analyze_all["last_update"] = datetime.now(timezone.utc).isoformat()
+                print(f"[AnalyzeAll] done — all generations already analyzed")
+                return
+
+            print(f"[AnalyzeAll] {len(uncached)} generations to analyze (of {len(all_ids)} total)")
+
+            for gen_id in uncached:
+                with _analyze_all["lock"]:
+                    if _analyze_all["stop_requested"]:
+                        _analyze_all["running"] = False
+                        print("[AnalyzeAll] stopped mid-batch")
+                        return
+
+                result = _analyze_single_gen(gen_id)
+
+                with _analyze_all["lock"]:
+                    if result["status"] == "ok":
+                        _analyze_all["done"] += 1
+                    elif result["status"] == "skipped":
+                        _analyze_all["skipped"] += 1
+                    else:
+                        _analyze_all["errors"] += 1
+                    _analyze_all["last_update"] = datetime.now(timezone.utc).isoformat()
+
+                # Small delay between requests (be polite to APIs)
+                time.sleep(0.3)
+
+        except Exception as e:
+            with _analyze_all["lock"]:
+                _analyze_all["running"] = False
+                _analyze_all["last_update"] = datetime.now(timezone.utc).isoformat()
+            print(f"[AnalyzeAll] fatal error: {e}")
+            return
+        finally:
+            dbs.close()
+        break
+
+    with _analyze_all["lock"]:
+        _analyze_all["running"] = False
+    print(f"[AnalyzeAll] completed: done={_analyze_all['done']} skipped={_analyze_all['skipped']} errors={_analyze_all['errors']}")
+
+
+@app.route("/api/analyze-all/start", methods=["POST"])
+def api_analyze_all_start():
+    """Start background analysis of all unanalyzed generations."""
+    with _analyze_all["lock"]:
+        if _analyze_all["running"]:
+            return jsonify({"status": "already_running"})
+        _analyze_all["running"] = True
+        _analyze_all["done"] = 0
+        _analyze_all["skipped"] = 0
+        _analyze_all["total"] = 0
+        _analyze_all["errors"] = 0
+        _analyze_all["stop_requested"] = False
+        _analyze_all["started_at"] = datetime.now(timezone.utc).isoformat()
+        _analyze_all["last_update"] = _analyze_all["started_at"]
+
+        t = threading.Thread(target=_analyze_all_worker, daemon=True)
+        _analyze_all["thread"] = t
+        t.start()
+
+    provider = _provider_state["provider"]
+    print(f"[AnalyzeAll] started with provider={provider}")
+    return jsonify({"status": "started", "provider": provider})
+
+
+@app.route("/api/analyze-all/status")
+def api_analyze_all_status():
+    """Poll analyze-all progress."""
+    with _analyze_all["lock"]:
+        return jsonify({
+            "running": _analyze_all["running"],
+            "done": _analyze_all["done"],
+            "skipped": _analyze_all["skipped"],
+            "total": _analyze_all["total"],
+            "errors": _analyze_all["errors"],
+            "startedAt": _analyze_all["started_at"],
+            "lastUpdate": _analyze_all["last_update"],
+        })
+
+
+@app.route("/api/analyze-all/stop", methods=["POST"])
+def api_analyze_all_stop():
+    """Request analyze-all to stop."""
+    with _analyze_all["lock"]:
+        _analyze_all["stop_requested"] = True
+    return jsonify({"status": "stopping"})
+
+
 def _summarize_all_worker(employee: str):
     """Background thread: summarize all sessions without summary for an employee."""
     print(f"[Summarizer][summarize_all_worker] started for {employee}")

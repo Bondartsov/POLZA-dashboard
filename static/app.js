@@ -119,6 +119,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadPage();
   startAutoRefresh();
   pollBackfillStatus(); // Check if backfill is running from previous session
+  checkAnalyzeAllStatus(); // Check if analyze-all is running from previous session
 });
 
 // ─── Auto-refresh ───────────────────────────────────────────────────────────────
@@ -462,15 +463,15 @@ function renderChart(id, type, data, opts = {}) {
 // ─── Render: Table ──────────────────────────────────────────────────────────────
 function renderTable() {
   const tbody = document.getElementById('tableBody');
-  if (S.loading) { tbody.innerHTML = '<tr><td colspan="11" class="loading"><div class="spinner"></div><br>Загрузка...</td></tr>'; return; }
+  if (S.loading) { tbody.innerHTML = '<tr><td colspan="12" class="loading"><div class="spinner"></div><br>Загрузка...</td></tr>'; return; }
   const items = S.filtered;
-  if (!items.length) { tbody.innerHTML = '<tr><td colspan="11" style="padding:16px;text-align:center;color:var(--text2)">Нет данных</td></tr>'; return; }
+  if (!items.length) { tbody.innerHTML = '<tr><td colspan="12" style="padding:16px;text-align:center;color:var(--text2)">Нет данных</td></tr>'; return; }
   let pageItems = S.allLoaded ? items.slice((S.page-1)*S.limit, S.page*S.limit) : items;
   let html = '';
   if (S.groupMode === 'flat') { html += renderRows(pageItems); }
   else {
     const groups = groupItems(pageItems);
-    for (const g of groups) { html += `<tr class="group-row"><td colspan="11">${groupLabel(g)}</td></tr>`; html += renderRows(g.items); }
+    for (const g of groups) { html += `<tr class="group-row"><td colspan="12">${groupLabel(g)}</td></tr>`; html += renderRows(g.items); }
   }
   tbody.innerHTML = html;
 }
@@ -479,6 +480,7 @@ function renderRows(items) {
   return items.map(it => {
     const ci = getCacheInfo(it), cost = parseFloat(it.cost)||0;
     const prompt = it.usage?.prompt_tokens || 0;
+    const catCell = renderCategoryCell(it);
     const aiCell = renderAiCell(it);
     return `<tr onclick="openDetail('${it.id}')">
       <td>${fmtDate(it.createdAt)}</td>
@@ -491,10 +493,33 @@ function renderRows(items) {
       <td><span class="cache-write ${ci.write===0?'zero':''}">${ci.write > 0 ? fmtNum(ci.write) : '—'}</span></td>
       <td>${fmtTime(it.generationTimeMs)}</td>
       <td>${it.apiKeyName||it.apiKeyShort||it._sourceKey||'—'}</td>
+      <td>${catCell}</td>
       <td>${aiCell}</td>
     </tr>`;
   }).join('');
 }
+
+// ─── START_BLOCK_CATEGORY_CELL
+function renderCategoryCell(it) {
+  const sum = S[`summary_${it.id}`];
+  if (!sum) return '<span style="color:var(--text2)">—</span>';
+  const isWork = sum.isWork !== false;
+  const flags = Array.isArray(sum.riskFlags) ? sum.riskFlags : [];
+  // Main category badge
+  let badge = '';
+  if (isWork && flags.length === 0) {
+    badge = '<span class="cat-badge cat-work">✅ Рабочий</span>';
+  } else if (!isWork) {
+    badge = '<span class="cat-badge cat-personal">⚠️ Личное</span>';
+  } else {
+    // Work but with flags — show primary flag
+    const f = flags[0];
+    const labels = { personal: '👤 Личное', sensitive: '🔒 Секрет', high_cost: '💸 Дорого', unusual_model: '🤔 Модель' };
+    badge = `<span class="cat-badge cat-flagged">${labels[f] || '⚠️ ' + f}</span>`;
+  }
+  return badge;
+}
+// ─── END_BLOCK_CATEGORY_CELL
 
 // ─── START_BLOCK_AI_CELL
 // Minimal cell: topic (if analyzed) or grey 🧠 (not analyzed).
@@ -866,6 +891,100 @@ async function backfillStop() {
   stopBackfillPoll();
   const data = await (await fetch('/api/sessions/backfill/status')).json();
   renderBackfillIndicator(data);
+}
+
+// ─── Analyze ALL (background) ────────────────────────────────────────────────
+
+let _analyzeAllPollTimer = null;
+
+async function startAnalyzeAll() {
+  const btn = document.getElementById('btnAnalyzeAll');
+  if (_analyzeAllPollTimer) {
+    // Already running → stop
+    await fetch('/api/analyze-all/stop', { method: 'POST' });
+    return;
+  }
+  if (!confirm(`Запустить AI-анализ всех неанализированных записей?\n\nПровайдер: ${getProviderLabel()}\nЭто может занять значительное время.`)) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ Запуск...';
+  const r = await fetch('/api/analyze-all/start', { method: 'POST' });
+  const data = await r.json();
+  btn.disabled = false;
+  if (data.status === 'already_running') {
+    alert('Анализ уже запущен');
+  }
+  startAnalyzeAllPoll();
+}
+
+function startAnalyzeAllPoll() {
+  if (_analyzeAllPollTimer) return;
+  _analyzeAllPollTimer = setInterval(pollAnalyzeAllStatus, 2000);
+  pollAnalyzeAllStatus();
+}
+
+function stopAnalyzeAllPoll() {
+  if (_analyzeAllPollTimer) { clearInterval(_analyzeAllPollTimer); _analyzeAllPollTimer = null; }
+}
+
+async function pollAnalyzeAllStatus() {
+  try {
+    const data = await (await fetch('/api/analyze-all/status')).json();
+    renderAnalyzeAllIndicator(data);
+    const btn = document.getElementById('btnAnalyzeAll');
+    if (data.running) {
+      const pct = data.total > 0 ? Math.round((data.done + data.skipped + data.errors) / data.total * 100) : 0;
+      btn.textContent = `⏳ Остановить (${data.done}/${data.total})`;
+      btn.onclick = async () => { await fetch('/api/analyze-all/stop', { method: 'POST' }); };
+      showProgress(`🧠 AI-анализ: ${data.done} готово / ${data.total} всего (${data.errors} ошибок)`, pct);
+    } else {
+      btn.textContent = '🧠 Анализ всех';
+      btn.onclick = startAnalyzeAll;
+      btn.disabled = false;
+      hideProgress();
+      if (data.done > 0 || data.skipped > 0) {
+        // Final refresh
+        stopAnalyzeAllPoll();
+        await prefetchSummaries();
+        renderTable();
+      } else {
+        stopAnalyzeAllPoll();
+      }
+    }
+  } catch(e) { /* ignore */ }
+}
+
+function renderAnalyzeAllIndicator(d) {
+  const el = document.getElementById('analyzeAllIndicator');
+  const icon = document.getElementById('analyzeAllIcon');
+  const text = document.getElementById('analyzeAllText');
+  const time = document.getElementById('analyzeAllTime');
+
+  if (!d.running && d.done === 0 && d.skipped === 0 && d.errors === 0) {
+    el.style.display = 'none';
+    return;
+  }
+
+  el.style.display = 'flex';
+  const processed = d.done + d.skipped + d.errors;
+  const pct = d.total > 0 ? Math.round(processed / d.total * 100) : 0;
+
+  if (d.running) {
+    icon.textContent = '⏳';
+    text.textContent = `🧠 ${d.done}/${d.total} (${pct}%)`;
+    time.textContent = d.lastUpdate ? fmtDate(d.lastUpdate) : '';
+  } else {
+    icon.textContent = '✅';
+    text.textContent = `🧠 Готово: ${d.done} проан., ${d.skipped} проп., ${d.errors} ош.`;
+    time.textContent = '';
+  }
+}
+
+// Also check analyze-all status on page load
+async function checkAnalyzeAllStatus() {
+  try {
+    const data = await (await fetch('/api/analyze-all/status')).json();
+    if (data.running) startAnalyzeAllPoll();
+  } catch(e) {}
 }
 
 // ─── START_BLOCK_AI_SUMMARIZE
