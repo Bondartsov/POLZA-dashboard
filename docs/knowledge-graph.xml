@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 3.5.0 -->
+<!-- VERSION: 3.6.0 -->
 <!-- CHANGELOG:
+       3.6.0 (2026-04-23): Phase-4c "OpenRouter Cloud Free Provider".
+                           Added OpenRouter (Gemma 4 31B free) as third LLM provider.
+                           Updated M-LLM-PROVIDER: _llm_call_openrouter, OPENROUTER_* env vars.
+                           Updated M-PROVIDER-UI: Cloud Free radio button.
+                           Updated M-APP: provider_set accepts "openrouter".
+                           New constraint: openrouter_free.
        3.5.0 (2026-04-22): Phase-4b "Persistent Analyze-All + Auto-Analyze".
                            New modules: M-ANALYSIS-STATE, M-AUTO-ANALYZE.
                            Updated M-LLM-GEN-SUMMARIZE for persistent analyze-all with DB-backed state.
@@ -23,7 +29,7 @@
        3.1.0: Session summaries, 95-chunk SocratiCode index.
 -->
 
-<KnowledgeGraph project="polza-dashboard" version="3.5.0">
+<KnowledgeGraph project="polza-dashboard" version="3.6.0">
 
   <M-APP NAME="Flask App" TYPE="ENTRY_POINT">
     <purpose>Flask web-server v3: DB-backed API + proxy for detail/log + background backfill + per-generation AI summarize</purpose>
@@ -46,7 +52,7 @@
       <fn-gen_summary_delete PURPOSE="DELETE /api/generation/summary — drop cache, force regeneration" />
       <fn-session_summarize PURPOSE="POST /api/session/summarize — session-level summary (only when session_id exists)" />
       <fn-provider_config PURPOSE="GET /api/provider/config — returns current provider, available providers with model/cost info, autoAnalyze state" />
-      <fn-provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama, autoAnalyze?: bool}. Switches _provider_state at runtime" />
+      <fn-provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama|openrouter, autoAnalyze?: bool}. Switches _provider_state at runtime" />
       <fn-analysis_stats PURPOSE="GET /api/analysis-stats — always-available endpoint: total/analyzed/remaining counts + current job state from DB" />
       <fn-analyze_all_start PURPOSE="POST /api/analyze-all/start — starts or resumes analyze-all job. State persisted to analysis_state table." />
       <fn-analyze_all_status PURPOSE="GET /api/analyze-all/status — returns DB-backed + in-memory state" />
@@ -245,14 +251,15 @@
     </annotations>
   </M-EMPLOYEE-REPORT>
 
-  <M-LLM-PROVIDER NAME="Dual LLM Provider" TYPE="INTEGRATION">
-    <purpose>Abstract LLM calls to support both Anthropic (Cloud) and Ollama (On-Prem). Runtime provider switching via _provider_state. Includes robust JSON parser for Qwen output.</purpose>
+  <M-LLM-PROVIDER NAME="LLM Provider (triple)" TYPE="INTEGRATION">
+    <purpose>Abstract LLM calls to support Anthropic (Cloud), Ollama (On-Prem), and OpenRouter (Cloud Free). Runtime provider switching via _provider_state. Includes robust JSON parser for Qwen output.</purpose>
     <path>polza_dashboard.py</path>
     <depends>M-APP</depends>
     <annotations>
       <fn-_llm_call_anthropic PURPOSE="Refactored Anthropic native Messages API call — original _llm_call_summarize logic" />
       <fn-_llm_call_ollama PURPOSE="New Ollama native /api/chat endpoint with think:false — 2-5s response for Qwen models" />
-      <fn-_llm_call_summarize PURPOSE="Dispatcher: reads _provider_state, routes to _llm_call_anthropic or _llm_call_ollama" />
+      <fn-_llm_call_openrouter PURPOSE="Call OpenRouter API (OpenAI-compatible /v1/chat/completions). Free Gemma 4 31B model." />
+      <fn-_llm_call_summarize PURPOSE="Dispatcher: reads _provider_state, routes to _llm_call_anthropic or _llm_call_ollama or _llm_call_openrouter" />
       <fn-_parse_llm_json PURPOSE="Robust JSON extraction — strips &lt;think&gt; tags, markdown fences, extracts first valid JSON object" />
       <fn-api_provider_config PURPOSE="GET /api/provider/config — returns {provider, providers: [{id, name, model, cost_info}]}" />
       <fn-api_provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama}. Updates _provider_state dict at runtime." />
@@ -262,7 +269,11 @@
       <config-OLLAMA_EMBED_MODEL PURPOSE="Ollama embedding model, default nomic-embed-text-v2-moe:latest" />
       <config-OLLAMA_THINKING PURPOSE="Enable/disable thinking mode, default false" />
       <config-OLLAMA_TIMEOUT PURPOSE="Ollama request timeout in seconds, default 120" />
+      <config-OPENROUTER_API_KEY PURPOSE="OpenRouter API key for authentication" />
+      <config-OPENROUTER_MODEL PURPOSE="OpenRouter model ID, default google/gemma-4-31b-it:free" />
+      <config-OPENROUTER_BASE_URL PURPOSE="OpenRouter API base URL, default https://openrouter.ai/api/v1/chat/completions" />
       <discovery-think_parameter>Ollama native /api/chat with {"think": false} gives 2-5s response. OpenAI-compatible /v1/chat/completions does NOT support think parameter. /no_think in prompt text doesn't work — must use API parameter.</discovery-think_parameter>
+      <discovery-openrouter_auth>OpenRouter uses Bearer auth (Authorization: Bearer $OPENROUTER_API_KEY) via OpenAI-compatible /v1/chat/completions endpoint. Response format: choices[0].message.content. Free model: google/gemma-4-31b-it:free, cost=$0.</discovery-openrouter_auth>
       <log-prefix>[Provider]</log-prefix>
     </annotations>
   </M-LLM-PROVIDER>
@@ -298,15 +309,16 @@
   </M-QDRANT>
 
   <M-PROVIDER-UI NAME="Provider Toggle UI" TYPE="UI_COMPONENT">
-    <purpose>Sidebar radio buttons for runtime LLM provider switching with model/cost info display and AI section provider badges.</purpose>
+    <purpose>Sidebar radio buttons for runtime LLM provider switching with model/cost info display and AI section provider badges. Three providers: On-Prem, Cloud, Cloud Free.</purpose>
     <path>static/app.js</path>
     <depends>M-STATIC</depends>
     <annotations>
       <fn-loadProviderConfig PURPOSE="GET /api/provider/config on page load — populate radio state and provider info labels" />
       <fn-setProvider PURPOSE="POST /api/provider/set on radio click — switch provider, update UI labels and badge" />
-      <ui-radio PURPOSE="Radio buttons: 🏠 On-Prem (Qwen) — free, ~2-5s / ☁️ Cloud (Haiku) — ~$0.002, ~3s" />
-      <ui-provider_badge PURPOSE="AI section shows provider label (🏠/☁️) next to analysis result" />
-      <ui-vector_badge PURPOSE="🔵 Embedded indicator when vector stored in Qdrant" />
+      <ui-radio PURPOSE="Radio buttons: On-Prem (Qwen) — free, ~2-5s / Cloud (Haiku) — ~$0.002, ~3s / Cloud Free (Gemma 4 31B) — $0.00" />
+      <ui-radio_openrouter PURPOSE="Radio button: Cloud Free — Gemma 4 31B · $0.00" />
+      <ui-provider_badge PURPOSE="AI section shows provider label next to analysis result" />
+      <ui-vector_badge PURPOSE="Embedded indicator when vector stored in Qdrant" />
       <css-classes>provider-toggle, provider-option, provider-info, provider-badge, vector-badge</css-classes>
     </annotations>
   </M-PROVIDER-UI>
@@ -359,6 +371,7 @@
     <constraint-provider_runtime>Provider switch via POST /api/provider/set takes effect immediately on next _llm_call_summarize. No server restart needed.</constraint-provider_runtime>
     <constraint-analysis_persistent>Analyze-all state persisted in analysis_state table. Stop = pause (resume-capable). Server restart auto-resumes if was running/paused. Frontend auto-resumes polling on page load.</constraint-analysis_persistent>
     <constraint-auto_analyze>AUTO_ANALYZE env toggle + runtime /api/provider/set {autoAnalyze: bool}. SyncWorker.on_new_records callback triggers _analyze_single_gen for each new record after sync.</constraint-auto_analyze>
+    <constraint-openrouter_free>OpenRouter Gemma 4 31B is free ($0). Uses OpenAI-compatible /v1/chat/completions with Bearer auth. Response format: choices[0].message.content.</constraint-openrouter_free>
     <constraint-refresh_interval>Frontend auto-refresh interval configurable: 10s/30s/60s/2min/5min dropdown in sidebar. Stored in JS state S.refreshInterval.</constraint-refresh_interval>
   </Constraints>
 

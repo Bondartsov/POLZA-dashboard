@@ -179,6 +179,10 @@ async function loadProviderConfig() {
       const ai = document.getElementById('providerAnthropicInfo');
       if (ai) ai.textContent = `${cfg.anthropic.model} · ~$0.002`;
     }
+    if (cfg.openrouter) {
+      const ori = document.getElementById('providerOpenRouterInfo');
+      if (ori) ori.textContent = `Gemma 4 31B · $0.00`;
+    }
     // Auto-analyze checkbox
     const aa = document.getElementById('autoAnalyzeSwitch');
     if (aa) aa.checked = cfg.autoAnalyze === true;
@@ -214,11 +218,13 @@ async function toggleAutoAnalyze() {
 
 function getProviderLabel() {
   if (S.provider === 'ollama') return 'Qwen · бесплатно';
+  if (S.provider === 'openrouter') return 'Gemma 4 · бесплатно';
   return 'Haiku · ~$0.002';
 }
 
 function getProviderEstimate() {
   if (S.provider === 'ollama') return '~5-10 сек';
+  if (S.provider === 'openrouter') return '~5-15 сек';
   return '~2-3 сек';
 }
 
@@ -1165,7 +1171,7 @@ function renderAiSection(genId, li) {
     const metaHtml = `
       <div class="ai-meta">
         ${sum.cached ? '✅ из кеша БД' : '🆕 только что'}
-        ${sum.provider === 'ollama' ? ' · 🏠 On-Prem' : ' · ☁️ Cloud'}
+        ${sum.provider === 'ollama' ? ' · 🏠 On-Prem' : sum.provider === 'openrouter' ? ' · 🌐 Cloud Free' : ' · ☁️ Cloud'}
         ${sum.llmModel ? ` · ${esc(sum.llmModel)}` : ''}
         ${sum.updatedAt ? ` · ${fmtDate(sum.updatedAt)}` : ''}
         ${sum.llmCost != null ? ` · $${Number(sum.llmCost).toFixed(6)}` : ''}
@@ -1228,7 +1234,7 @@ function renderAiSection(genId, li) {
 
 async function runGenAnalysis(genId, force = false) {
   const block = document.getElementById(`aiBlock_${genId}`);
-  const providerName = S.provider === 'ollama' ? 'Qwen' : 'Claude Haiku';
+  const providerName = S.provider === 'ollama' ? 'Qwen' : S.provider === 'openrouter' ? 'Gemma 4' : 'Claude Haiku';
   if (block) {
     block.innerHTML = `
       <div class="ai-block-header">

@@ -50,12 +50,17 @@ LLM_MODEL = "claude-haiku-4-5"
 LLM_API_KEY = ""
 
 # On-prem (Ollama)
-LLM_PROVIDER = "ollama"  # "anthropic" | "ollama" — runtime switchable via /api/provider/set
+LLM_PROVIDER = "ollama"  # "anthropic" | "ollama" | "openrouter" — runtime switchable
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_CHAT_MODEL = "qwen3.5:4b"
 OLLAMA_EMBED_MODEL = "nomic-embed-text-v2-moe:latest"
 OLLAMA_THINKING = False  # if True, allows Qwen thinking mode (slower but deeper)
 OLLAMA_TIMEOUT = 120
+
+# Cloud (OpenRouter)
+OPENROUTER_API_KEY = ""
+OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Qdrant (vector DB)
 QDRANT_URL = "http://localhost:6335"
@@ -218,11 +223,19 @@ def api_provider_config():
             "model": LLM_MODEL,
             "available": bool(LLM_API_KEY),
         },
+        "openrouter": {
+            "model": OPENROUTER_MODEL,
+            "available": bool(OPENROUTER_API_KEY),
+        },
     }
     if provider == "ollama":
         config["activeModel"] = OLLAMA_CHAT_MODEL
         config["activeCost"] = "$0.000"
         config["activeEstimate"] = "~5-10 сек" if not OLLAMA_THINKING else "~60 сек"
+    elif provider == "openrouter":
+        config["activeModel"] = OPENROUTER_MODEL
+        config["activeCost"] = "$0.000"
+        config["activeEstimate"] = "~5-15 сек"
     else:
         config["activeModel"] = LLM_MODEL
         config["activeCost"] = "~$0.002"
@@ -232,11 +245,11 @@ def api_provider_config():
 
 @app.route("/api/provider/set", methods=["POST"])
 def api_provider_set():
-    """Switch LLM provider at runtime. Body: {provider: "ollama"|"anthropic", autoAnalyze?: bool}."""
+    """Switch LLM provider at runtime. Body: {provider: "ollama"|"anthropic"|"openrouter", autoAnalyze?: bool}."""
     data = request.get_json(silent=True) or {}
     provider = data.get("provider", "")
-    if provider and provider not in ("ollama", "anthropic"):
-        return jsonify({"error": "provider must be 'ollama' or 'anthropic'"}), 400
+    if provider and provider not in ("ollama", "anthropic", "openrouter"):
+        return jsonify({"error": "provider must be 'ollama', 'anthropic', or 'openrouter'"}), 400
     if provider:
         _provider_state["provider"] = provider
         print(f"[Provider] switched to {provider}")
@@ -1366,14 +1379,63 @@ def _llm_call_ollama(user_text: str):
 
 def _llm_call_summarize(user_text: str):
     """
-    Dispatcher: call current provider (Anthropic or Ollama).
+    Dispatcher: call current provider (Anthropic, Ollama, or OpenRouter).
     Returns tuple (parsed_dict, usage_dict).
     """
     provider = _provider_state["provider"]
     if provider == "ollama":
         return _llm_call_ollama(user_text)
+    elif provider == "openrouter":
+        return _llm_call_openrouter(user_text)
     else:
         return _llm_call_anthropic(user_text)
+
+
+def _llm_call_openrouter(user_text: str):
+    """Call OpenRouter API (OpenAI-compatible /v1/chat/completions). Returns (parsed_dict, usage_info)."""
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "max_tokens": 600,
+        "temperature": 0.2,
+        "messages": [
+            {"role": "system", "content": GEN_SUMMARIZE_PROMPT},
+            {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{user_text}"},
+        ],
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://polza-dashboard.local",
+        "X-Title": "Polza.AI Dashboard",
+    }
+    url = f"{OPENROUTER_BASE_URL}/chat/completions"
+
+    r = http_requests.post(url, headers=headers, json=payload, timeout=120)
+    if r.status_code != 200:
+        raise ValueError(f"OpenRouter HTTP {r.status_code}: {r.text[:500]}")
+
+    data = r.json()
+    content = ""
+    choices = data.get("choices", [])
+    if choices:
+        content = choices[0].get("message", {}).get("content", "")
+
+    if not content:
+        raise ValueError("OpenRouter returned empty content")
+
+    parsed = _parse_llm_json(content)
+
+    or_usage = data.get("usage", {}) or {}
+    usage_info = {
+        "input_tokens": or_usage.get("prompt_tokens", 0),
+        "output_tokens": or_usage.get("completion_tokens", 0),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cost_usd": 0.0,  # free model
+        "model": OPENROUTER_MODEL,
+        "provider": "openrouter",
+    }
+    return parsed, usage_info
 
 
 # ─── Embedding pipeline ────────────────────────────────────────────────────────
@@ -2222,6 +2284,7 @@ def main():
     global LLM_PROVIDER, OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL
     global OLLAMA_THINKING, OLLAMA_TIMEOUT
     global QDRANT_URL, QDRANT_COLLECTION, QDRANT_ENABLED
+    global OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_BASE_URL
 
     load_env()
     parser = argparse.ArgumentParser(description="Polza.AI Dashboard v3")
@@ -2245,6 +2308,11 @@ def main():
     OLLAMA_THINKING = os.environ.get("OLLAMA_THINKING", "").lower() in ("true", "1", "yes")
     OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", OLLAMA_TIMEOUT))
 
+    # OpenRouter (Gemma free) config
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+    OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", OPENROUTER_MODEL)
+    OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL)
+
     # Qdrant config
     QDRANT_URL = os.environ.get("QDRANT_URL", QDRANT_URL)
     QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", QDRANT_COLLECTION)
@@ -2255,13 +2323,16 @@ def main():
     auto_analyze_env = os.environ.get("AUTO_ANALYZE", "false").lower() in ("true", "1", "yes")
     _provider_state["auto_analyze"] = auto_analyze_env
 
-    provider_icon = "🏠 On-Prem" if LLM_PROVIDER == "ollama" else "☁️ Cloud"
+    provider_icon = {"ollama": "🏠 On-Prem", "anthropic": "☁️ Cloud", "openrouter": "🌐 OpenRouter"}.get(LLM_PROVIDER, "❓")
     print(f"🧠 LLM provider: {provider_icon} ({LLM_PROVIDER})")
     if LLM_PROVIDER == "ollama":
         print(f"   Ollama: {OLLAMA_BASE_URL}, model={OLLAMA_CHAT_MODEL}, embed={OLLAMA_EMBED_MODEL}")
         print(f"   Thinking: {'ON' if OLLAMA_THINKING else 'OFF'}, timeout={OLLAMA_TIMEOUT}s")
+    elif LLM_PROVIDER == "openrouter":
+        print(f"   OpenRouter: model={OPENROUTER_MODEL}, key={'✅' if OPENROUTER_API_KEY else '❌'}")
     else:
         print(f"   Anthropic: url={LLM_API_URL}, model={LLM_MODEL}, key={'✅' if LLM_API_KEY else '❌'}")
+    print(f"   Available: ollama ✅ | anthropic {'✅' if LLM_API_KEY else '❌'} | openrouter {'✅' if OPENROUTER_API_KEY else '❌'}")
     print(f"📦 Qdrant: {QDRANT_URL}/{QDRANT_COLLECTION} ({'enabled' if QDRANT_ENABLED else 'disabled'})")
     print(f"🔄 Auto-analyze: {'ON' if auto_analyze_env else 'OFF'} (AUTO_ANALYZE env)")
 
