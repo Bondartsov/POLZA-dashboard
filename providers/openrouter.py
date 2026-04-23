@@ -1,6 +1,7 @@
 import time
 import requests as http_requests
-from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, _provider_state, OPENROUTER_MODEL
+import config
+from config import _provider_state, OPENROUTER_MODEL
 from providers.prompt import GEN_SUMMARIZE_PROMPT
 from providers.anthropic import _parse_llm_json
 
@@ -19,12 +20,12 @@ def _llm_call_openrouter(user_text: str):
         ],
     }
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://polza-dashboard.local",
         "X-Title": "Polza.AI Dashboard",
     }
-    url = f"{OPENROUTER_BASE_URL}/chat/completions"
+    url = f"{config.OPENROUTER_BASE_URL}/chat/completions"
 
     max_retries = 4
     for attempt in range(max_retries + 1):

@@ -1,5 +1,5 @@
 import requests as http_requests
-from config import OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL
+import config
 
 
 def _embed_text(text: str):
@@ -7,8 +7,8 @@ def _embed_text(text: str):
         return None
     try:
         r = http_requests.post(
-            f"{OLLAMA_BASE_URL}/api/embed",
-            json={"model": OLLAMA_EMBED_MODEL, "input": text[:2000]},
+            f"{config.OLLAMA_BASE_URL}/api/embed",
+            json={"model": config.OLLAMA_EMBED_MODEL, "input": text[:2000]},
             timeout=30,
         )
         if r.status_code != 200:

@@ -1,7 +1,7 @@
 import json
 import re
 import requests as http_requests
-from config import LLM_API_URL, LLM_API_KEY, LLM_MODEL
+import config
 from providers.prompt import GEN_SUMMARIZE_PROMPT
 
 
@@ -47,7 +47,7 @@ def _parse_llm_json(raw_text: str) -> dict:
 
 def _llm_call_anthropic(user_text: str):
     llm_payload = {
-        "model": LLM_MODEL,
+        "model": config.LLM_MODEL,
         "max_tokens": 900,
         "temperature": 0.2,
         "system": [
@@ -62,12 +62,12 @@ def _llm_call_anthropic(user_text: str):
         ],
     }
     _llm_headers = {
-        "x-api-key": LLM_API_KEY,
+        "x-api-key": config.LLM_API_KEY,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
     llm_r = http_requests.post(
-        LLM_API_URL, headers=_llm_headers, json=llm_payload, timeout=45,
+        config.LLM_API_URL, headers=_llm_headers, json=llm_payload, timeout=45,
     )
     if llm_r.status_code != 200:
         raise ValueError(f"Anthropic HTTP {llm_r.status_code}: {llm_r.text[:300]}")
@@ -97,6 +97,6 @@ def _llm_call_anthropic(user_text: str):
         + usage_info["cache_read_input_tokens"] * 0.10
     ) / 1_000_000
     usage_info["cost_usd"] = round(cost, 6)
-    usage_info["model"] = LLM_MODEL
+    usage_info["model"] = config.LLM_MODEL
     usage_info["provider"] = "anthropic"
     return parsed, usage_info
