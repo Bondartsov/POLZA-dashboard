@@ -65,7 +65,8 @@ function setQuickDate(range) {
   else if (range === 'month') { const d = new Date(now); d.setMonth(d.getMonth() - 1); from = d.toISOString().slice(0, 10); }
   document.getElementById('dateFrom').value = from || '';
   document.getElementById('dateTo').value = today;
-  applyFilters();
+  S.allLoaded = false;
+  loadPage();
 }
 
 // ─── Balance ────────────────────────────────────────────────────────────────────
