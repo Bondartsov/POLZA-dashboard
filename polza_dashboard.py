@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, send_from_directory
 import requests as http_requests
+import re
 from sqlalchemy import func, desc, asc, String as SaString
 
 if sys.platform == "win32":
@@ -1235,15 +1236,19 @@ GEN_SUMMARIZE_PROMPT = """Ты — аналитик корпоративного
 # START_BLOCK_GEN_SUMMARIZE_HELPERS
 
 def _parse_llm_json(raw_text: str) -> dict:
-    """Robust JSON parser for LLM output. Handles markdown wrapping, extra text."""
+    """Robust JSON parser for LLM output. Handles markdown wrapping, <think/> tags, trailing commas, extra text."""
     json_str = raw_text.strip()
+    # Strip <think/> and <think thinking/> self-closing tags
+    json_str = re.sub(r"<think[^>]*/\s*>", "", json_str)
+    # Strip <think ...>...</think paired tags
+    json_str = re.sub(r"<think[^>]*>.*?</think\s*>", "", json_str, flags=re.DOTALL)
+    json_str = json_str.strip()
     # Try direct parse
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:
         pass
     # Extract from ```json ... ``` code block
-    import re
     m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", json_str, re.DOTALL)
     if m:
         try:
@@ -1268,8 +1273,11 @@ def _parse_llm_json(raw_text: str) -> dict:
         elif ch == '}':
             depth -= 1
             if depth == 0 and start is not None:
+                candidate = json_str[start:i + 1]
+                # Fix trailing commas before } or ]
+                candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
                 try:
-                    return json.loads(json_str[start:i + 1])
+                    return json.loads(candidate)
                 except json.JSONDecodeError:
                     start = None
     raise json.JSONDecodeError("Could not extract JSON from LLM output", json_str, 0)
@@ -1433,6 +1441,7 @@ def _llm_call_openrouter(user_text: str):
     if not content:
         raise ValueError("OpenRouter returned empty content")
 
+    print(f"[Provider][OpenRouter] raw response ({len(content)} chars): {content[:300]}")
     parsed = _parse_llm_json(content)
 
     or_usage = data.get("usage", {}) or {}
@@ -1710,6 +1719,7 @@ def api_generation_summarize():
             "topic": "Ошибка разбора ответа LLM",
             "summary": "Модель вернула невалидный JSON — попробуйте ещё раз.",
             "isWork": True, "generationId": gen_id, "cached": False,
+            "provider": _provider_state.get("provider", "unknown"),
         }), 200
     except Exception as e:
         print(f"[GenSummarize] ERROR: {e}")
