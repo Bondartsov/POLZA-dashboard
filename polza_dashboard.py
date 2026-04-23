@@ -1392,7 +1392,8 @@ def _llm_call_summarize(user_text: str):
 
 
 def _llm_call_openrouter(user_text: str):
-    """Call OpenRouter API (OpenAI-compatible /v1/chat/completions). Returns (parsed_dict, usage_info)."""
+    """Call OpenRouter API (OpenAI-compatible /v1/chat/completions). Returns (parsed_dict, usage_info).
+    Retries up to 4 times on 429 rate-limit with exponential backoff (2s, 4s, 8s, 16s)."""
     payload = {
         "model": OPENROUTER_MODEL,
         "max_tokens": 600,
@@ -1410,9 +1411,18 @@ def _llm_call_openrouter(user_text: str):
     }
     url = f"{OPENROUTER_BASE_URL}/chat/completions"
 
-    r = http_requests.post(url, headers=headers, json=payload, timeout=120)
-    if r.status_code != 200:
-        raise ValueError(f"OpenRouter HTTP {r.status_code}: {r.text[:500]}")
+    max_retries = 4
+    for attempt in range(max_retries + 1):
+        r = http_requests.post(url, headers=headers, json=payload, timeout=120)
+        if r.status_code == 200:
+            break
+        if r.status_code == 429 and attempt < max_retries:
+            wait = 2 ** (attempt + 1)  # 2, 4, 8, 16 seconds
+            print(f"[Provider][OpenRouter] 429 rate-limited, retry {attempt+1}/{max_retries} in {wait}s...")
+            time.sleep(wait)
+            continue
+        if r.status_code != 200:
+            raise ValueError(f"OpenRouter HTTP {r.status_code}: {r.text[:500]}")
 
     data = r.json()
     content = ""
@@ -1944,8 +1954,9 @@ def _analyze_all_worker():
                             errors=_analyze_all["errors"],
                         )
 
-                    # Small delay between requests
-                    time.sleep(0.3)
+                    # Delay between requests — longer for cloud providers to avoid rate limits
+                    delay = 1.0 if _provider_state.get("provider") in ("openrouter", "anthropic") else 0.3
+                    time.sleep(delay)
 
             except Exception as e:
                 update_analysis_state(status="error")
