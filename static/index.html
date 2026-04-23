@@ -48,9 +48,15 @@
         <input type="radio" name="provider" value="openrouter" onchange="setProvider('openrouter')">
         <span class="provider-label">
           <span class="provider-icon">🌐</span> Cloud Free
-          <span class="provider-info" id="providerOpenRouterInfo">Nemotron 3 · $0.00</span>
+          <span class="provider-info" id="providerOpenRouterInfo">$0.00</span>
         </span>
       </label>
+      <div id="openrouterModelSelect" style="display:none;margin:-2px 0 4px 28px;">
+        <select id="orModelDropdown" onchange="setOpenRouterModel(this.value)" style="width:100%;padding:3px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text1);">
+          <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 Super 120B</option>
+          <option value="google/gemma-4-31b-it:free">Gemma 4 31B</option>
+        </select>
+      </div>
       <label class="auto-analyze-toggle" style="margin-top:6px">
         <input type="checkbox" id="autoAnalyzeSwitch" onchange="toggleAutoAnalyze()">
         <span>🤖 Авто-анализ новых</span>

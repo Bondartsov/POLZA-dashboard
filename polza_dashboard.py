@@ -63,13 +63,19 @@ OPENROUTER_API_KEY = ""
 OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# Available OpenRouter models (id → display label)
+OPENROUTER_MODELS = {
+    "nvidia/nemotron-3-super-120b-a12b:free": "Nemotron 3 Super 120B",
+    "google/gemma-4-31b-it:free": "Gemma 4 31B",
+}
+
 # Qdrant (vector DB)
 QDRANT_URL = "http://localhost:6335"
 QDRANT_COLLECTION = "Polza_user_logs"
 QDRANT_ENABLED = True  # set False to disable vector storage
 
 # Runtime provider state (in-memory, can be switched via API)
-_provider_state = {"provider": "ollama", "auto_analyze": False}  # default, overridden by .env then API
+_provider_state = {"provider": "ollama", "auto_analyze": False, "openrouter_model": OPENROUTER_MODEL}  # default, overridden by .env then API
 
 
 # ─── .env loader ─────────────────────────────────────────────────────────────────
@@ -225,7 +231,8 @@ def api_provider_config():
             "available": bool(LLM_API_KEY),
         },
         "openrouter": {
-            "model": OPENROUTER_MODEL,
+            "model": _provider_state.get("openrouter_model", OPENROUTER_MODEL),
+            "models": [{"id": k, "label": v} for k, v in OPENROUTER_MODELS.items()],
             "available": bool(OPENROUTER_API_KEY),
         },
     }
@@ -234,7 +241,7 @@ def api_provider_config():
         config["activeCost"] = "$0.000"
         config["activeEstimate"] = "~5-10 сек" if not OLLAMA_THINKING else "~60 сек"
     elif provider == "openrouter":
-        config["activeModel"] = OPENROUTER_MODEL
+        config["activeModel"] = _provider_state.get("openrouter_model", OPENROUTER_MODEL)
         config["activeCost"] = "$0.000"
         config["activeEstimate"] = "~5-15 сек"
     else:
@@ -257,7 +264,12 @@ def api_provider_set():
     if "autoAnalyze" in data:
         _provider_state["auto_analyze"] = bool(data["autoAnalyze"])
         print(f"[Provider] auto_analyze={_provider_state['auto_analyze']}")
-    return jsonify({"ok": True, "provider": _provider_state["provider"], "autoAnalyze": _provider_state["auto_analyze"]})
+    if "openrouterModel" in data:
+        model = data["openrouterModel"]
+        if model in OPENROUTER_MODELS:
+            _provider_state["openrouter_model"] = model
+            print(f"[Provider] openrouter model switched to {model}")
+    return jsonify({"ok": True, "provider": _provider_state["provider"], "autoAnalyze": _provider_state["auto_analyze"], "openrouterModel": _provider_state.get("openrouter_model", OPENROUTER_MODEL)})
 
 
 # ─── Routes: DB-backed generations ────────────────────────────────────────────────
@@ -1402,8 +1414,9 @@ def _llm_call_summarize(user_text: str):
 def _llm_call_openrouter(user_text: str):
     """Call OpenRouter API (OpenAI-compatible /v1/chat/completions). Returns (parsed_dict, usage_info).
     Retries up to 4 times on 429 rate-limit with exponential backoff (2s, 4s, 8s, 16s)."""
+    model = _provider_state.get("openrouter_model", OPENROUTER_MODEL)
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": model,
         "max_tokens": 600,
         "temperature": 0.2,
         "reasoning": {"enabled": False},
@@ -1453,7 +1466,7 @@ def _llm_call_openrouter(user_text: str):
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "cost_usd": 0.0,  # free model
-        "model": OPENROUTER_MODEL,
+        "model": model,
         "provider": "openrouter",
     }
     return parsed, usage_info

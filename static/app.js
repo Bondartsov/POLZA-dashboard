@@ -182,8 +182,13 @@ async function loadProviderConfig() {
     }
     if (cfg.openrouter) {
       const ori = document.getElementById('providerOpenRouterInfo');
-      if (ori) ori.textContent = `Nemotron 3 · $0.00`;
+      if (ori) ori.textContent = `$0.00`;
+      const dd = document.getElementById('orModelDropdown');
+      if (dd && cfg.openrouter.model) dd.value = cfg.openrouter.model;
     }
+    // Show/hide model dropdown
+    const orSel = document.getElementById('openrouterModelSelect');
+    if (orSel) orSel.style.display = cfg.provider === 'openrouter' ? '' : 'none';
     // Auto-analyze checkbox
     const aa = document.getElementById('autoAnalyzeSwitch');
     if (aa) aa.checked = cfg.autoAnalyze === true;
@@ -200,7 +205,22 @@ async function setProvider(provider) {
     if (!r.ok) return;
     S.provider = provider;
     if (S.providerConfig) S.providerConfig.provider = provider;
+    // Show/hide model dropdown
+    const orSel = document.getElementById('openrouterModelSelect');
+    if (orSel) orSel.style.display = provider === 'openrouter' ? '' : 'none';
   } catch(e) { console.warn('provider switch failed:', e); }
+}
+
+async function setOpenRouterModel(model) {
+  try {
+    const r = await fetch('/api/provider/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({openrouterModel: model}),
+    });
+    if (!r.ok) return;
+    if (S.providerConfig && S.providerConfig.openrouter) S.providerConfig.openrouter.model = model;
+  } catch(e) { console.warn('openrouter model switch failed:', e); }
 }
 
 async function toggleAutoAnalyze() {
@@ -219,7 +239,11 @@ async function toggleAutoAnalyze() {
 
 function getProviderLabel() {
   if (S.provider === 'ollama') return 'Qwen · бесплатно';
-  if (S.provider === 'openrouter') return 'Nemotron 3 · бесплатно';
+  if (S.provider === 'openrouter') {
+    const dd = document.getElementById('orModelDropdown');
+    const label = dd ? dd.options[dd.selectedIndex].text : 'Nemotron 3';
+    return label + ' · бесплатно';
+  }
   return 'Haiku · ~$0.002';
 }
 
@@ -1235,7 +1259,7 @@ function renderAiSection(genId, li) {
 
 async function runGenAnalysis(genId, force = false) {
   const block = document.getElementById(`aiBlock_${genId}`);
-  const providerName = S.provider === 'ollama' ? 'Qwen' : S.provider === 'openrouter' ? 'Nemotron 3' : 'Claude Haiku';
+  const providerName = S.provider === 'ollama' ? 'Qwen' : S.provider === 'openrouter' ? (document.getElementById('orModelDropdown')?.options[document.getElementById('orModelDropdown').selectedIndex]?.text || 'Cloud Free') : 'Claude Haiku';
   if (block) {
     block.innerHTML = `
       <div class="ai-block-header">
