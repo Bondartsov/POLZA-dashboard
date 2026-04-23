@@ -251,6 +251,31 @@ def api_provider_config():
     return jsonify(config)
 
 
+def _persist_provider_to_env():
+    """Write current provider + openrouter model to .env so they survive restart."""
+    env_path = BASE_DIR / ".env"
+    if not env_path.exists():
+        return
+    try:
+        text = env_path.read_text(encoding="utf-8")
+        provider = _provider_state["provider"]
+        model = _provider_state.get("openrouter_model", OPENROUTER_MODEL)
+        import re as _re
+        # Update or add LLM_PROVIDER
+        if "LLM_PROVIDER=" in text:
+            text = _re.sub(r"^LLM_PROVIDER=.*$", f"LLM_PROVIDER={provider}", text, flags=re.MULTILINE)
+        else:
+            text += f"\nLLM_PROVIDER={provider}\n"
+        # Update or add OPENROUTER_MODEL
+        if "OPENROUTER_MODEL=" in text:
+            text = _re.sub(r"^OPENROUTER_MODEL=.*$", f"OPENROUTER_MODEL={model}", text, flags=re.MULTILINE)
+        else:
+            text += f"\nOPENROUTER_MODEL={model}\n"
+        env_path.write_text(text, encoding="utf-8")
+    except Exception as e:
+        print(f"[Provider] persist to .env failed: {e}")
+
+
 @app.route("/api/provider/set", methods=["POST"])
 def api_provider_set():
     """Switch LLM provider at runtime. Body: {provider: "ollama"|"anthropic"|"openrouter", autoAnalyze?: bool}."""
@@ -269,6 +294,7 @@ def api_provider_set():
         if model in OPENROUTER_MODELS:
             _provider_state["openrouter_model"] = model
             print(f"[Provider] openrouter model switched to {model}")
+    _persist_provider_to_env()
     return jsonify({"ok": True, "provider": _provider_state["provider"], "autoAnalyze": _provider_state["auto_analyze"], "openrouterModel": _provider_state.get("openrouter_model", OPENROUTER_MODEL)})
 
 
@@ -2356,6 +2382,7 @@ def main():
 
     # Set runtime provider from env
     _provider_state["provider"] = LLM_PROVIDER
+    _provider_state["openrouter_model"] = OPENROUTER_MODEL
     auto_analyze_env = os.environ.get("AUTO_ANALYZE", "false").lower() in ("true", "1", "yes")
     _provider_state["auto_analyze"] = auto_analyze_env
 
