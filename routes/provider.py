@@ -1,10 +1,9 @@
 from flask import Blueprint, jsonify, request
-
+import config as _config
 from config import (
     _provider_state, _persist_provider_to_env,
-    LLM_API_URL, LLM_MODEL, LLM_API_KEY,
     OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL, OLLAMA_THINKING,
-    OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_BASE_URL, OPENROUTER_MODELS,
+    OPENROUTER_MODEL, OPENROUTER_MODELS,
     BASE_DIR,
 )
 
@@ -24,13 +23,13 @@ def api_provider_config():
             "thinking": OLLAMA_THINKING,
         },
         "anthropic": {
-            "model": LLM_MODEL,
-            "available": bool(LLM_API_KEY),
+            "model": _config.LLM_MODEL,
+            "available": bool(_config.LLM_API_KEY),
         },
         "openrouter": {
             "model": _provider_state.get("openrouter_model", OPENROUTER_MODEL),
             "models": [{"id": k, "label": v} for k, v in OPENROUTER_MODELS.items()],
-            "available": bool(OPENROUTER_API_KEY),
+            "available": bool(_config.OPENROUTER_API_KEY),
         },
     }
     if provider == "ollama":
@@ -42,7 +41,7 @@ def api_provider_config():
         config["activeCost"] = "$0.000"
         config["activeEstimate"] = "~5-15 сек"
     else:
-        config["activeModel"] = LLM_MODEL
+        config["activeModel"] = _config.LLM_MODEL
         config["activeCost"] = "~$0.002"
         config["activeEstimate"] = "~2-3 сек"
     try:
