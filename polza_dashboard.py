@@ -248,10 +248,17 @@ def api_provider_config():
         config["activeModel"] = LLM_MODEL
         config["activeCost"] = "~$0.002"
         config["activeEstimate"] = "~2-3 сек"
-    # Saved default for badge
-    saved_provider = os.environ.get("LLM_PROVIDER", "ollama")
-    saved_model = os.environ.get("OPENROUTER_MODEL", OPENROUTER_MODEL)
-    config["savedDefault"] = saved_provider + ("/" + saved_model if saved_provider == "openrouter" else "")
+    # Saved default for badge — read from .env file (not os.environ, which isn't updated by persist)
+    try:
+        _env_text = (BASE_DIR / ".env").read_text(encoding="utf-8")
+        import re as _re_saved
+        _m_prov = _re_saved.search(r"^LLM_PROVIDER=(.+)$", _env_text, _re_saved.MULTILINE)
+        _m_model = _re_saved.search(r"^OPENROUTER_MODEL=(.+)$", _env_text, _re_saved.MULTILINE)
+        _sp = _m_prov.group(1).strip() if _m_prov else "ollama"
+        _sm = _m_model.group(1).strip() if _m_model else OPENROUTER_MODEL
+        config["savedDefault"] = _sp + ("/" + _sm if _sp == "openrouter" else "")
+    except Exception:
+        config["savedDefault"] = ""
     return jsonify(config)
 
 
