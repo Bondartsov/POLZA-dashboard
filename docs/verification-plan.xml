@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<VerificationPlan VERSION="0.5.2">
+<VerificationPlan VERSION="1.0.0">
   <!-- CHANGELOG:
+         1.0.0 (2026-04-23): Phase-5 "Modular Refactoring".
+                             New critical flow: VF-014 (refactoring smoke test — all endpoints work after split).
+                             New module check: V-M-CONFIG (config.py imports).
+                             Updated file references in module checks (polza_dashboard → config/providers/etc).
+                             Updated import checks to use new module paths.
          0.5.2 (2026-04-23): Phase-4d "Model Selector + Prompt Tuning".
                              New critical flow: VF-013 (model switch scenario — switch to Gemma, analyze, verify model in response).
                              Updated V-M-LLM-PROVIDER for openrouter_model checks.
@@ -181,9 +186,53 @@
       </required-signals>
     </VF-013>
 
+    <VF-014 NAME="Refactoring smoke test — all endpoints work after split" USE_CASES="ALL" DATA_FLOW="ALL" PRIORITY="critical">
+      <scenario>After splitting polza_dashboard.py into packages, verify every endpoint still responds correctly. No regressions in API behavior.</scenario>
+      <expected-outcome>
+        GET / returns index.html (200).
+        GET /api/config returns JSON (200).
+        GET /api/health returns JSON (200).
+        GET /api/db/all returns generations array (200).
+        GET /api/db/generations returns paginated results (200).
+        POST /api/generation/summarize with known ID returns summary (200).
+        POST /api/generation-summaries with IDs returns cached summaries (200).
+        DELETE /api/generation/summary removes cache (200).
+        GET /api/provider/config returns all three providers (200).
+        POST /api/provider/set switches provider (200).
+        GET /api/analysis-stats returns counts (200).
+        POST /api/analyze-all/start starts job (200).
+        POST /api/analyze-all/stop pauses job (200).
+        POST /api/keys registers keys (200).
+        POST /api/sync triggers sync (200).
+        All import chains resolve: config, providers.*, embeddings.*, workers.*, routes.*.
+        No circular import errors on startup.
+      </expected-outcome>
+      <required-signals>
+        <log-marker> * Running on http://0.0.0.0:5000 (server started without import errors)</log-marker>
+        <log-marker>No ImportError or ModuleNotFoundError in startup log</log-marker>
+      </required-signals>
+    </VF-014>
+
   </CriticalFlows>
 
   <ModuleVerification>
+
+    <V-M-CONFIG MODULE="M-CONFIG" PRIORITY="high">
+      <module-checks>
+        <check-1>python -c "from config import app, _provider_state, OPENROUTER_MODELS; assert app is not None; assert 'provider' in _provider_state"</check-1>
+        <check-2>python -c "from providers import _llm_call_summarize; print('providers OK')"</check-2>
+        <check-3>python -c "from embeddings import _embed_text; print('embeddings OK')"</check-3>
+        <check-4>python -c "from workers import _analyze_single_gen; print('workers OK')"</check-4>
+        <check-5>python -c "from routes import register_all; print('routes OK')"</check-5>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">All package imports resolve without circular dependency errors</scenario-1>
+        <scenario-2 kind="success">_provider_state has provider key with default value</scenario-2>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>No ImportError in startup</marker-1>
+      </required-log-markers>
+    </V-M-CONFIG>
 
     <V-M-SUMMARY-STORE MODULE="M-SUMMARY-STORE" PRIORITY="high">
       <test-files>
@@ -228,7 +277,7 @@
         <file>tests/test_llm_anthropic.py</file>
       </test-files>
       <module-checks>
-        <check-1>python -c "from polza_dashboard import LLM_API_URL, LLM_MODEL, LLM_API_KEY; assert LLM_API_URL.startswith('https://'); assert LLM_MODEL; assert len(LLM_API_KEY) > 20"</check-1>
+        <check-1>python -c "from config import LLM_API_URL, LLM_MODEL, LLM_API_KEY; assert LLM_API_URL.startswith('https://'); assert LLM_MODEL; assert len(LLM_API_KEY) > 20"</check-1>
         <check-2>curl -s -X POST "$LLM_API_URL" -H "x-api-key: $LLM_API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" -d '{"model":"claude-haiku-4-5","max_tokens":20,"messages":[{"role":"user","content":"ping"}]}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('type') == 'message' or d.get('role') == 'assistant' or 'content' in d"</check-2>
       </module-checks>
       <scenarios>
@@ -398,7 +447,7 @@
 
     <V-M-ANOMALY MODULE="M-ANOMALY" PRIORITY="deprecated">
       <module-checks>
-        <check-1>python -c "from polza_dashboard import _detect_anomalies; print('callable')"</check-1>
+        <check-1>python -c "from routes.employee import detect_anomalies; print('callable')"</check-1>
       </module-checks>
       <scenarios>
         <scenario-1 kind="success">Function still importable and returns list when called</scenario-1>
@@ -504,8 +553,8 @@
       <goal>Persistent analyze-all with DB state, auto-analyze on sync, configurable refresh interval, visual analysis status, always-visible stats counter</goal>
       <commands>
         <command-1>curl -s http://localhost:5000/api/analysis-stats | python3 -m json.tool</command-1>
-        <command-2>curl -s -X POST http://localhost:5000/api/analyze-all/start | python3 -m json.tool</command-1>
-        <command-3>sleep 5 && curl -s http://localhost:5000/api/analysis-stats | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['job']['status'] in ('running','paused')"</command-3>
+        <command-2>curl -s -X POST http://localhost:5000/api/analyze-all/start | python3 -m json.tool</command-2>
+        <command-3>sleep 5 &amp;&amp; curl -s http://localhost:5000/api/analysis-stats | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['job']['status'] in ('running','paused')"</command-3>
         <command-4>curl -s -X POST http://localhost:5000/api/analyze-all/stop | python3 -m json.tool</command-4>
         <command-5>curl -s http://localhost:5000/api/analysis-stats | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['job']['status']=='paused'"</command-5>
         <command-6>PGPASSWORD=bond psql -h localhost -U dbadmin -d polza_dashboard -c "SELECT status, done, total FROM analysis_state WHERE id=1;"</command-6>
@@ -521,6 +570,27 @@
         <evidence-8>UI: AI column shows 🔄/⏳/🧠/✅ status icons</evidence-8>
       </required-evidence>
     </Gate-Phase-4b>
+
+    <Gate-Phase-5 PHASE="Phase-5" STATUS="done">
+      <goal>Modular refactoring: monolithic polza_dashboard.py split into packages. Zero functional regressions — all endpoints work identically.</goal>
+      <commands>
+        <command-1>python -c "from config import app; from providers import _llm_call_summarize; from embeddings import _embed_text; from workers import _analyze_single_gen; from routes import register_all; print('all imports OK')"</command-1>
+        <command-2>curl -s http://localhost:5000/ | grep -q 'html' &amp;&amp; echo 'index OK'</command-2>
+        <command-3>curl -s http://localhost:5000/api/health | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('ok')==True"</command-3>
+        <command-4>curl -s http://localhost:5000/api/db/all | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'items' in d or 'generations' in d"</command-4>
+        <command-5>curl -s http://localhost:5000/api/provider/config | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'provider' in d"</command-5>
+        <command-6>curl -s http://localhost:5000/api/analysis-stats | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'total' in d"</command-6>
+      </commands>
+      <required-evidence>
+        <evidence-1>All package imports succeed without circular dependency errors</evidence-1>
+        <evidence-2>GET / returns index.html (200)</evidence-2>
+        <evidence-3>GET /api/health returns {ok: true} (200)</evidence-3>
+        <evidence-4>GET /api/db/all returns generations (200)</evidence-4>
+        <evidence-5>GET /api/provider/config returns provider state (200)</evidence-5>
+        <evidence-6>GET /api/analysis-stats returns counts (200)</evidence-6>
+        <evidence-7>No ImportError or ModuleNotFoundError in startup log</evidence-7>
+      </required-evidence>
+    </Gate-Phase-5>
 
   </PhaseGates>
 

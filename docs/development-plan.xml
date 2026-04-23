@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<DevelopmentPlan VERSION="0.5.2">
+<DevelopmentPlan VERSION="1.0.0">
   <!-- CHANGELOG:
+         1.0.0 (2026-04-23): Phase-5 "Modular Refactoring".
+                             Monolithic polza_dashboard.py (2168 lines) split into modular packages.
+                             New packages: config.py, providers/, embeddings/, workers/, routes/.
+                             polza_dashboard.py now entrypoint only (main function).
+                             Updated all module target paths to reflect new file locations.
+                             New modules: M-CONFIG, M-PROVIDERS, M-EMBEDDINGS, M-WORKERS, M-ROUTES.
          0.5.2 (2026-04-23): Phase-4d "Model Selector + Prompt Tuning".
                              Updated GEN_SUMMARIZE_PROMPT: summary 6-8 sentences (was 3-5).
                              Updated max_tokens: 900 for generation summarize (was 600), 1000 for session summarize (was 700).
@@ -45,23 +51,69 @@
 
     <!-- ═══ EXISTING MODULES (done) ═══ -->
 
-    <M-APP NAME="Flask App" TYPE="ENTRY_POINT" LAYER="0" ORDER="1" STATUS="done">
+    <M-APP NAME="Flask App Entrypoint" TYPE="ENTRY_POINT" LAYER="0" ORDER="1" STATUS="done">
       <contract>
-        <purpose>Flask web-server v3: DB-backed API + proxy + background threads + AI summarize endpoints</purpose>
-        <inputs>HTTP requests from browser</inputs>
-        <outputs>JSON API responses, static files</outputs>
+        <purpose>Minimal entrypoint: creates Flask app from config, registers all route blueprints, starts background workers, runs server. Only contains main() function.</purpose>
+        <inputs>CLI invocation</inputs>
+        <outputs>Running Flask server</outputs>
       </contract>
       <interface>
-        <fn-index PURPOSE="Serve index.html" />
-        <fn-config PURPOSE="Auth config + keys + sync status" />
-        <fn-health PURPOSE="DB health check" />
+        <fn-main PURPOSE="Entrypoint: init Flask app, register routes, init DB, start workers, run server" />
       </interface>
-      <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-PROVIDER</depends>
+      <depends>M-CONFIG, M-ROUTES, M-DB, M-SYNC, M-WORKERS</depends>
       <target>
         <source>polza_dashboard.py</source>
       </target>
       <verification-ref>V-M-APP</verification-ref>
     </M-APP>
+
+    <M-CONFIG NAME="App Configuration" TYPE="INFRASTRUCTURE" LAYER="0" ORDER="0" STATUS="done">
+      <contract>
+        <purpose>Flask app factory, global state, environment variable loading, shared helper functions</purpose>
+      </contract>
+      <target>
+        <source>config.py</source>
+      </target>
+      <verification-ref>V-M-CONFIG</verification-ref>
+    </M-CONFIG>
+
+    <M-PROVIDERS NAME="LLM Providers Package" TYPE="INTEGRATION" LAYER="1" ORDER="4" STATUS="done">
+      <contract>
+        <purpose>LLM provider implementations: Anthropic, Ollama, OpenRouter. Prompt template and dispatch logic.</purpose>
+      </contract>
+      <target>
+        <source>providers/__init__.py, providers/anthropic.py, providers/ollama.py, providers/openrouter.py, providers/prompt.py, providers/dispatcher.py</source>
+      </target>
+      <verification-ref>V-M-LLM-PROVIDER</verification-ref>
+    </M-PROVIDERS>
+
+    <M-EMBEDDINGS NAME="Embeddings Package" TYPE="INTEGRATION" LAYER="1" ORDER="5" STATUS="done">
+      <contract>
+        <purpose>Vector embedding generation and Qdrant storage</purpose>
+      </contract>
+      <target>
+        <source>embeddings/__init__.py, embeddings/embed.py, embeddings/qdrant.py</source>
+      </target>
+      <verification-ref>V-M-EMBEDDING</verification-ref>
+    </M-EMBEDDINGS>
+
+    <M-WORKERS NAME="Background Workers Package" TYPE="CORE_LOGIC" LAYER="2" ORDER="3" STATUS="done">
+      <contract>
+        <purpose>Background worker threads for analyze-all, auto-analyze, and session summarization</purpose>
+      </contract>
+      <target>
+        <source>workers/__init__.py, workers/analyze_all.py, workers/session_summarizer.py</source>
+      </target>
+    </M-WORKERS>
+
+    <M-ROUTES NAME="Routes Package" TYPE="ENTRY_POINT" LAYER="0" ORDER="2" STATUS="done">
+      <contract>
+        <purpose>Flask route blueprints covering all HTTP endpoints</purpose>
+      </contract>
+      <target>
+        <source>routes/__init__.py, routes/misc.py, routes/generations.py, routes/summarize.py, routes/sessions.py, routes/analyze.py, routes/employee.py, routes/provider.py, routes/keys.py, routes/sync.py, routes/proxy.py</source>
+      </target>
+    </M-ROUTES>
 
     <M-DB NAME="Database Layer" TYPE="DATA_LAYER" LAYER="0" ORDER="1" STATUS="done">
       <contract>
@@ -94,7 +146,7 @@
       </contract>
       <depends>M-DB</depends>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>routes/sessions.py</source>
       </target>
       <verification-ref>V-M-BACKFILL</verification-ref>
     </M-BACKFILL>
@@ -114,7 +166,7 @@
         <purpose>Parse API keys from Excel paste, .env, free text</purpose>
       </contract>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>routes/keys.py</source>
       </target>
     </M-KEYS>
 
@@ -149,7 +201,7 @@
       </interface>
       <depends>M-DB, M-SUMMARY-STORE, M-LLM-ANTHROPIC</depends>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>workers/session_summarizer.py, routes/sessions.py</source>
       </target>
       <observability>
         <log-prefix>[Summarizer]</log-prefix>
@@ -169,7 +221,7 @@
       </interface>
       <depends>M-DB</depends>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>routes/employee.py</source>
       </target>
       <observability>
         <log-prefix>[Anomaly]</log-prefix>
@@ -190,7 +242,7 @@
       </interface>
       <depends>M-DB, M-SUMMARY-STORE</depends>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>routes/employee.py</source>
       </target>
       <observability>
         <log-prefix>[EmployeeReport]</log-prefix>
@@ -257,7 +309,7 @@
       </interface>
       <depends>M-APP</depends>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>providers/anthropic.py</source>
       </target>
       <observability>
         <log-prefix>[GenSummarize][LLM]</log-prefix>
@@ -290,7 +342,7 @@
       </interface>
       <depends>M-DB, M-GEN-SUMMARY-STORE, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT</depends>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>routes/summarize.py, workers/analyze_all.py</source>
       </target>
       <observability>
         <log-prefix>[GenSummarize]</log-prefix>
@@ -331,7 +383,7 @@
       </interface>
       <depends>M-APP</depends>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>providers/dispatcher.py, providers/anthropic.py, providers/ollama.py, providers/openrouter.py</source>
       </target>
       <observability>
         <log-prefix>[Provider]</log-prefix>
@@ -358,7 +410,7 @@
       </interface>
       <depends>M-APP</depends>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>embeddings/embed.py</source>
       </target>
       <observability>
         <log-prefix>[Embedding]</log-prefix>
@@ -380,11 +432,11 @@
       <interface>
         <fn-_get_qdrant_client PURPOSE="Lazy init Qdrant client with graceful fallback if qdrant_client not installed or QDRANT_ENABLED=false" />
         <fn-_qdrant_ensure_collection PURPOSE="Create Polza_user_logs collection (768-dim, cosine) if not exists" />
-        <fn-_qdrant_upsert PURPOSE="Store vector + payload for a generation_id. Payload: generation_id, topic, session_id, key_name, model, created_at</fn-_qdrant_upsert>
+        <fn-_qdrant_upsert PURPOSE="Store vector + payload for a generation_id. Payload: generation_id, topic, session_id, key_name, model, created_at" />
       </interface>
       <depends>M-EMBEDDING</depends>
       <target>
-        <source>polza_dashboard.py</source>
+        <source>embeddings/qdrant.py</source>
       </target>
       <observability>
         <log-prefix>[Qdrant]</log-prefix>
@@ -574,6 +626,16 @@
       <step-5 module="M-STATIC" status="updated">Configurable refresh interval (10s-5min dropdown). Persistent stats counter in topbar. Visual status: 🔄 В очереди / ⏳ Ожидает / 🧠 / ✅. Auto-resume polling on page load.</step-5>
       <step-6 module="M-DB" status="updated">New AnalysisState model + get_analysis_state, update_analysis_state, get_analysis_counts helpers. New analysis_state table.</step-6>
     </Phase-4b>
+
+    <Phase-5 name="Modular Refactoring" status="done">
+      <goal>Split monolithic polza_dashboard.py (2168 lines) into modular packages for maintainability. Zero functional changes — all endpoints and behavior preserved.</goal>
+      <step-1 module="M-CONFIG" status="done">Extract config.py: Flask app factory, global state, env loading, shared helpers</step-1>
+      <step-2 module="M-PROVIDERS" status="done">Extract providers/: anthropic.py, ollama.py, openrouter.py, prompt.py, dispatcher.py with __init__.py re-exports</step-2>
+      <step-3 module="M-EMBEDDINGS" status="done">Extract embeddings/: embed.py (_embed_text, _extract_user_text_from_log), qdrant.py (client, collection, upsert)</step-3>
+      <step-4 module="M-WORKERS" status="done">Extract workers/: analyze_all.py (_analyze_all_worker, _analyze_single_gen, _auto_analyze_new_records), session_summarizer.py (_summarize_single_session, _summarize_all_worker)</step-4>
+      <step-5 module="M-ROUTES" status="done">Extract routes/: misc.py, generations.py, summarize.py, sessions.py, analyze.py, employee.py, provider.py, keys.py, sync.py, proxy.py with register_all(app) in __init__.py</step-5>
+      <step-6 module="M-APP" status="done">Reduce polza_dashboard.py to entrypoint: main() only (148 lines)</step-6>
+    </Phase-5>
 
   </ImplementationOrder>
 

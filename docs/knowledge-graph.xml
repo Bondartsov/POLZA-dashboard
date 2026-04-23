@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 3.7.0 -->
+<!-- VERSION: 4.0.0 -->
 <!-- CHANGELOG:
+       4.0.0 (2026-04-23): Major refactoring — monolithic polza_dashboard.py (2168 lines) split into modular packages.
+                           New modules: M-CONFIG, M-PROVIDERS, M-EMBEDDINGS, M-WORKERS, M-ROUTES.
+                           M-APP now entrypoint only (main function). All routes, providers, workers, embeddings
+                           extracted into dedicated packages with __init__.py re-exports.
+                           Updated paths for all modules previously in polza_dashboard.py.
        3.7.0 (2026-04-23): Phase-4d "Model Selector + Prompt Tuning".
                            Added OPENROUTER_MODELS registry (Nemotron + Gemma 4), UI dropdown under Cloud Free radio.
                            Added openrouter_model field to _provider_state, switchable via /api/provider/set openrouterModel param.
@@ -34,37 +39,94 @@
        3.1.0: Session summaries, 95-chunk SocratiCode index.
 -->
 
-<KnowledgeGraph project="polza-dashboard" version="3.7.0">
+<KnowledgeGraph project="polza-dashboard" version="4.0.0">
 
-  <M-APP NAME="Flask App" TYPE="ENTRY_POINT">
-    <purpose>Flask web-server v3: DB-backed API + proxy for detail/log + background backfill + per-generation AI summarize</purpose>
+  <M-APP NAME="Flask App Entrypoint" TYPE="ENTRY_POINT">
+    <purpose>Minimal entrypoint: creates Flask app from config, registers all route blueprints, starts background workers, runs server. Only contains main() function.</purpose>
     <path>polza_dashboard.py</path>
-    <depends>M-DB, M-SYNC, M-KEYS, M-STATIC, M-BACKFILL, M-ANOMALY, M-GEN-SUMMARY-STORE, M-LLM-GEN-SUMMARIZE, M-LLM-ANTHROPIC, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT, M-ANALYSIS-STATE, M-AUTO-ANALYZE</depends>
+    <depends>M-CONFIG, M-ROUTES, M-DB, M-SYNC, M-WORKERS</depends>
     <annotations>
-      <fn-index PURPOSE="Serve index.html" />
-      <fn-config PURPOSE="Auth config + keys from DB + sync status" />
-      <fn-db_all PURPOSE="GET /api/db/all — all generations from PostgreSQL" />
-      <fn-db_gen PURPOSE="GET /api/db/generations — paginated from PostgreSQL" />
-      <fn-detail PURPOSE="Proxy to generation detail — resolves token from DB" />
-      <fn-log PURPOSE="Proxy to generation log — resolves token from DB" />
-      <fn-register PURPOSE="POST /api/keys — register keys in DB" />
-      <fn-sync_trigger PURPOSE="POST /api/sync — async trigger" />
-      <fn-sync_run PURPOSE="POST /api/sync/run — synchronous sync" />
-      <fn-balance PURPOSE="Account balance proxy" />
-      <fn-health PURPOSE="DB health check" />
-      <fn-gen_summarize PURPOSE="POST /api/generation/summarize — per-generation AI analysis via Haiku 4.5" />
-      <fn-gen_summaries_batch PURPOSE="POST /api/generation-summaries — batch prefetch cached summaries by ID list" />
-      <fn-gen_summary_delete PURPOSE="DELETE /api/generation/summary — drop cache, force regeneration" />
-      <fn-session_summarize PURPOSE="POST /api/session/summarize — session-level summary (only when session_id exists)" />
-      <fn-provider_config PURPOSE="GET /api/provider/config — returns current provider, available providers with model/cost info, autoAnalyze state" />
-      <fn-provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama|openrouter, autoAnalyze?: bool, openrouterModel?: str}. Switches _provider_state at runtime" />
-      <fn-analysis_stats PURPOSE="GET /api/analysis-stats — always-available endpoint: total/analyzed/remaining counts + current job state from DB" />
-      <fn-analyze_all_start PURPOSE="POST /api/analyze-all/start — starts or resumes analyze-all job. State persisted to analysis_state table." />
-      <fn-analyze_all_status PURPOSE="GET /api/analyze-all/status — returns DB-backed + in-memory state" />
-      <fn-analyze_all_stop PURPOSE="POST /api/analyze-all/stop — pauses job (resume-capable). Updates analysis_state to paused." />
-      <fn-analyze_all_pause PURPOSE="POST /api/analyze-all/pause — toggle pause/resume on running job" />
+      <fn-main PURPOSE="Entrypoint: init Flask app from config, register routes via register_all(app), init DB, start sync worker, start backfill worker, auto-resume analyze-all, run server" />
     </annotations>
   </M-APP>
+
+  <M-CONFIG NAME="App Configuration" TYPE="INFRASTRUCTURE">
+    <purpose>Flask app factory, global state (_provider_state, OPENROUTER_MODELS), environment variable loading, shared helper functions. Central config imported by all other modules.</purpose>
+    <path>config.py</path>
+    <depends>M-DB</depends>
+    <annotations>
+      <fn-app PURPOSE="Flask app instance creation and configuration" />
+      <fn-_provider_state PURPOSE="Runtime dict: {provider, openrouter_model, auto_analyze}. Defaults from env, switchable via API." />
+      <fn-env_loading PURPOSE="All LLM_*, OLLAMA_*, QDRANT_*, OPENROUTER_* env vars loaded at module level" />
+      <fn-OPENROUTER_MODELS PURPOSE="Registry of available OpenRouter models (Nemotron 31B, Gemma 4 31B)" />
+      <fn-_resolve_token_for_gen PURPOSE="Helper: resolve API token from DB by source_key_name for proxy endpoints" />
+    </annotations>
+  </M-CONFIG>
+
+  <M-PROVIDERS NAME="LLM Providers Package" TYPE="INTEGRATION">
+    <purpose>LLM provider implementations: Anthropic native, Ollama native, OpenRouter OpenAI-compatible. Plus prompt template and dispatch logic.</purpose>
+    <path>providers/__init__.py, providers/anthropic.py, providers/ollama.py, providers/openrouter.py, providers/prompt.py, providers/dispatcher.py</path>
+    <depends>M-CONFIG</depends>
+    <annotations>
+      <fn-_llm_call_anthropic PURPOSE="Anthropic native Messages API call with cache_control, cost computation" FILE="providers/anthropic.py" />
+      <fn-_parse_llm_json PURPOSE="Robust JSON extraction — strips think tags, markdown fences, extracts first valid JSON object" FILE="providers/anthropic.py" />
+      <fn-_llm_call_ollama PURPOSE="Ollama native /api/chat with think:false — 2-5s response" FILE="providers/ollama.py" />
+      <fn-_llm_call_openrouter PURPOSE="OpenRouter OpenAI-compatible /v1/chat/completions with retry" FILE="providers/openrouter.py" />
+      <fn-GEN_SUMMARIZE_PROMPT PURPOSE="Extended prompt template — 6-8 sentence detailed summary, strict JSON schema" FILE="providers/prompt.py" />
+      <fn-_llm_call_summarize PURPOSE="Dispatcher: reads _provider_state, routes to appropriate provider handler" FILE="providers/dispatcher.py" />
+    </annotations>
+  </M-PROVIDERS>
+
+  <M-EMBEDDINGS NAME="Embeddings Package" TYPE="INTEGRATION">
+    <purpose>Vector embedding generation and Qdrant storage. Split into embed logic and Qdrant client wrapper.</purpose>
+    <path>embeddings/__init__.py, embeddings/embed.py, embeddings/qdrant.py</path>
+    <depends>M-CONFIG</depends>
+    <annotations>
+      <fn-_embed_text PURPOSE="Call Ollama /api/embed with nomic-embed-text-v2-moe, return 768-dim vector" FILE="embeddings/embed.py" />
+      <fn-_extract_user_text_from_log PURPOSE="Concatenate user-role messages from Polza log, cap 4000 chars" FILE="embeddings/embed.py" />
+      <fn-_get_qdrant_client PURPOSE="Lazy init Qdrant client — returns None if not installed or QDRANT_ENABLED=false" FILE="embeddings/qdrant.py" />
+      <fn-_qdrant_ensure_collection PURPOSE="Create Polza_user_logs collection (768-dim, cosine) if not exists" FILE="embeddings/qdrant.py" />
+      <fn-_qdrant_upsert PURPOSE="Store vector + payload for generation_id" FILE="embeddings/qdrant.py" />
+    </annotations>
+  </M-EMBEDDINGS>
+
+  <M-WORKERS NAME="Background Workers Package" TYPE="CORE_LOGIC">
+    <purpose>Background worker threads for analyze-all, auto-analyze, and session summarization. Run independently of request handling.</purpose>
+    <path>workers/__init__.py, workers/analyze_all.py, workers/session_summarizer.py</path>
+    <depends>M-CONFIG, M-DB, M-PROVIDERS, M-EMBEDDINGS, M-GEN-SUMMARY-STORE, M-SUMMARY-STORE</depends>
+    <annotations>
+      <fn-_analyze_all_worker PURPOSE="Background thread: iterate unanalyzed generations, call _analyze_single_gen, persist state to DB" FILE="workers/analyze_all.py" />
+      <fn-_analyze_single_gen PURPOSE="Single generation: fetch log, extract text, LLM call + embed in parallel, dual store (PostgreSQL + Qdrant)" FILE="workers/analyze_all.py" />
+      <fn-_auto_analyze_new_records PURPOSE="SyncWorker callback: filter already-analyzed, call _analyze_single_gen for each new record" FILE="workers/analyze_all.py" />
+      <fn-_summarize_single_session PURPOSE="Summarize single session — returns from cache or calls LLM" FILE="workers/session_summarizer.py" />
+      <fn-_summarize_all_worker PURPOSE="Background thread: summarize all sessions" FILE="workers/session_summarizer.py" />
+    </annotations>
+  </M-WORKERS>
+
+  <M-ROUTES NAME="Routes Package" TYPE="ENTRY_POINT">
+    <purpose>Flask route blueprints. Each module registers a Blueprint via register_all(app). Covers all HTTP endpoints previously in monolithic polza_dashboard.py.</purpose>
+    <path>routes/__init__.py, routes/misc.py, routes/generations.py, routes/summarize.py, routes/sessions.py, routes/analyze.py, routes/employee.py, routes/provider.py, routes/keys.py, routes/sync.py, routes/proxy.py</path>
+    <depends>M-CONFIG, M-DB, M-PROVIDERS, M-EMBEDDINGS, M-WORKERS, M-GEN-SUMMARY-STORE, M-SUMMARY-STORE, M-SYNC, M-ANALYSIS-STATE</depends>
+    <annotations>
+      <fn-register_all PURPOSE="Register all blueprints on Flask app — called from main()" FILE="routes/__init__.py" />
+      <fn-index PURPOSE="Serve index.html" FILE="routes/misc.py" />
+      <fn-config PURPOSE="GET /api/config — auth config + keys + sync status" FILE="routes/misc.py" />
+      <fn-health PURPOSE="GET /api/health — DB health check" FILE="routes/misc.py" />
+      <fn-db_all PURPOSE="GET /api/db/all — all generations from PostgreSQL" FILE="routes/generations.py" />
+      <fn-db_gen PURPOSE="GET /api/db/generations — paginated from PostgreSQL" FILE="routes/generations.py" />
+      <fn-gen_summarize PURPOSE="POST /api/generation/summarize — per-generation AI analysis" FILE="routes/summarize.py" />
+      <fn-gen_summaries_batch PURPOSE="POST /api/generation-summaries — batch prefetch cached summaries by ID list" FILE="routes/summarize.py" />
+      <fn-gen_summary_delete PURPOSE="DELETE /api/generation/summary — drop cache, force regeneration" FILE="routes/summarize.py" />
+      <fn-session_endpoints PURPOSE="Session CRUD, backfill start/stop/retry/status, session summarize" FILE="routes/sessions.py" />
+      <fn-analyze_all_endpoints PURPOSE="POST /api/analyze-all/start, /stop, /pause; GET /api/analyze-all/status, /api/analysis-stats" FILE="routes/analyze.py" />
+      <fn-employee_endpoints PURPOSE="GET /api/employee-report, /api/employee-report/list, detect_anomalies" FILE="routes/employee.py" />
+      <fn-provider_config PURPOSE="GET /api/provider/config — returns current provider, available providers" FILE="routes/provider.py" />
+      <fn-provider_set PURPOSE="POST /api/provider/set — switch provider, autoAnalyze, openrouterModel" FILE="routes/provider.py" />
+      <fn-register_keys PURPOSE="POST /api/keys — register keys in DB" FILE="routes/keys.py" />
+      <fn-sync_endpoints PURPOSE="POST /api/sync (async), POST /api/sync/run (synchronous)" FILE="routes/sync.py" />
+      <fn-proxy_endpoints PURPOSE="/api/generations/{id} detail proxy, /api/balance proxy" FILE="routes/proxy.py" />
+    </annotations>
+  </M-ROUTES>
 
   <M-DB NAME="Database Layer" TYPE="DATA_LAYER">
     <purpose>SQLAlchemy ORM: api_keys + generations + session_summaries + generation_summaries tables in PostgreSQL</purpose>
@@ -97,8 +159,8 @@
 
   <M-BACKFILL NAME="Session Backfill" TYPE="CORE_LOGIC">
     <purpose>Background thread: enrich session_id/device_id for historical records where session_id IS NULL. Server-side — survives page refresh</purpose>
-    <path>polza_dashboard.py</path>
-    <depends>M-DB, M-APP</depends>
+    <path>routes/sessions.py</path>
+    <depends>M-DB, M-CONFIG</depends>
     <annotations>
       <fn-worker PURPOSE="_backfill_worker thread — processes batches of 50, handles errors, supports stop" />
       <fn-start PURPOSE="POST /api/sessions/backfill/start — start background thread" />
@@ -113,8 +175,8 @@
 
   <M-KEYS NAME="Key Parser" TYPE="UTILITY">
     <purpose>Parse API keys from Excel (tab-separated), .env, free text</purpose>
-    <path>polza_dashboard.py</path>
-    <depends>M-APP</depends>
+    <path>routes/keys.py</path>
+    <depends>M-CONFIG</depends>
     <annotations>
       <fn-parse_keys_text PURPOSE="Parse Name\tKey format from Excel paste" />
     </annotations>
@@ -146,7 +208,7 @@
       <fn-backfill_ui PURPOSE="Topbar indicator: ⏳/✅/❌ status, polling every 2s, start/stop/retry buttons" />
       <fn-key_filter PURPOSE="Dropdown filter by API key name" />
       <fn-theme PURPOSE="Dark/light theme toggle with localStorage" />
-      <tab-PAGE="📋 Плоский / 📅 По дням / 🤖 По моделям / 🔑 По ключам / 🧠 По темам AI" />
+      <tab-PAGE value="flat / by-day / by-model / by-key / by-ai-topic" />
       <css-classes>ai-cell, ai-cell-empty, ai-cell-done, ai-cell-personal, ai-block, ai-block-header, ai-block-empty, ai-block-body, ai-topic-big, ai-summary-text, ai-session-block, ai-session-header, ai-session-body, topic-group-header, topic-group-unanalyzed, btn-group-analyze, summary-work-badge, summary-flags</css-classes>
     </annotations>
   </M-STATIC>
@@ -181,8 +243,8 @@
 
   <M-LLM-ANTHROPIC NAME="Anthropic API Integration" TYPE="INTEGRATION">
     <purpose>Direct Anthropic Messages API integration (NOT proxied through Polza). Native payload format with prompt-caching support.</purpose>
-    <path>polza_dashboard.py (config block + _llm_call_summarize helper)</path>
-    <depends>M-APP</depends>
+    <path>providers/anthropic.py</path>
+    <depends>M-CONFIG</depends>
     <annotations>
       <config-LLM_API_URL PURPOSE="Anthropic endpoint URL, default https://api.anthropic.com/v1/messages, overridden from .env" />
       <config-LLM_MODEL PURPOSE="Model ID or alias. Default 'claude-haiku-4-5' (alias without date — Anthropic auto-serves latest Haiku 4.5 snapshot)" />
@@ -198,8 +260,8 @@
 
   <M-LLM-GEN-SUMMARIZE NAME="Generation Summarizer" TYPE="CORE_LOGIC">
     <purpose>Per-generation LLM analysis. Checks DB cache first; on miss, fetches Polza log, extracts user text, calls Anthropic, stores result. Manual trigger only (user clicks button in detail modal).</purpose>
-    <path>polza_dashboard.py</path>
-    <depends>M-DB, M-GEN-SUMMARY-STORE, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT</depends>
+    <path>routes/summarize.py, workers/analyze_all.py</path>
+    <depends>M-DB, M-GEN-SUMMARY-STORE, M-PROVIDERS, M-EMBEDDINGS</depends>
     <annotations>
       <fn-api_generation_summarize PURPOSE="POST /api/generation/summarize — body: {generationId, force?}. Returns cached result or fresh LLM output." />
       <fn-api_generation_summaries_batch PURPOSE="POST /api/generation-summaries — body: {ids: [...]}. Bulk prefetch for table render. Cap 500 ids." />
@@ -218,8 +280,8 @@
 
   <M-SESSION-SUMMARIZER NAME="Session Summarizer" TYPE="CORE_LOGIC">
     <purpose>LLM-powered summarization of a chat session — extracts task, topic, work/personal classification from user messages across all generations in a session</purpose>
-    <path>polza_dashboard.py</path>
-    <depends>M-DB, M-SUMMARY-STORE, M-LLM-ANTHROPIC</depends>
+    <path>workers/session_summarizer.py, routes/sessions.py</path>
+    <depends>M-DB, M-SUMMARY-STORE, M-PROVIDERS</depends>
     <annotations>
       <fn-summarize_single_session PURPOSE="Summarize single session — returns from cache or calls LLM (Anthropic native). Now uses prompt caching on system block." />
       <fn-api_session_summarize PURPOSE="POST /api/session/summarize — body: {sessionId}. Accessible only when generation has session_id (sub-block in detail modal)." />
@@ -230,8 +292,8 @@
   </M-SESSION-SUMMARIZER>
 
   <M-ANOMALY NAME="Anomaly Detector" TYPE="CORE_LOGIC" STATUS="code-remains-ui-removed">
-    <purpose>Detect suspicious usage patterns: off-hours, weekends, unusual models, burst activity. Functions remain in polza_dashboard.py but no UI consumes them after simplify-ui refactor.</purpose>
-    <path>polza_dashboard.py</path>
+    <purpose>Detect suspicious usage patterns: off-hours, weekends, unusual models, burst activity. Functions remain in routes/employee.py but no UI consumes them after simplify-ui refactor.</purpose>
+    <path>routes/employee.py</path>
     <depends>M-DB</depends>
     <annotations>
       <fn-detect PURPOSE="Analyze employee records, return anomaly list with type/severity/details" />
@@ -246,7 +308,7 @@
 
   <M-EMPLOYEE-REPORT NAME="Employee Report API" TYPE="ENTRY_POINT" STATUS="deprecated-endpoints-remain">
     <purpose>Fast aggregated report per employee — pure SQL, no AI. Endpoints remain callable but no frontend consumer after simplify-ui refactor.</purpose>
-    <path>polza_dashboard.py</path>
+    <path>routes/employee.py</path>
     <depends>M-DB, M-SUMMARY-STORE, M-ANOMALY</depends>
     <annotations>
       <fn-report_list PURPOSE="GET /api/employee-report/list — summary: each employee with cost/tokens/requests" />
@@ -258,8 +320,8 @@
 
   <M-LLM-PROVIDER NAME="LLM Provider (triple)" TYPE="INTEGRATION">
     <purpose>Abstract LLM calls to support Anthropic (Cloud), Ollama (On-Prem), and OpenRouter (Cloud Free). Runtime provider switching via _provider_state. Includes robust JSON parser for Qwen output.</purpose>
-    <path>polza_dashboard.py</path>
-    <depends>M-APP</depends>
+    <path>providers/dispatcher.py, providers/anthropic.py, providers/ollama.py, providers/openrouter.py</path>
+    <depends>M-CONFIG</depends>
     <annotations>
       <fn-_llm_call_anthropic PURPOSE="Refactored Anthropic native Messages API call — original _llm_call_summarize logic" />
       <fn-_llm_call_ollama PURPOSE="New Ollama native /api/chat endpoint with think:false — 2-5s response for Qwen models" />
@@ -286,8 +348,8 @@
 
   <M-EMBEDDING NAME="Embedding Pipeline" TYPE="INTEGRATION">
     <purpose>Generate 768-dim vector embeddings via Ollama nomic-embed-text-v2-moe model. Runs in parallel with LLM call via ThreadPoolExecutor.</purpose>
-    <path>polza_dashboard.py</path>
-    <depends>M-APP</depends>
+    <path>embeddings/embed.py</path>
+    <depends>M-CONFIG</depends>
     <annotations>
       <fn-_embed_text PURPOSE="Call Ollama /api/embed with model=nomic-embed-text-v2-moe:latest, return 768-dim float vector" />
       <config-OLLAMA_EMBED_MODEL PURPOSE="Embedding model name from .env, default nomic-embed-text-v2-moe:latest" />
@@ -299,7 +361,7 @@
 
   <M-QDRANT NAME="Qdrant Client Wrapper" TYPE="DATA_LAYER">
     <purpose>Qdrant vector DB integration for storing generation embeddings with metadata. Separate container polza-qdrant on port 6335.</purpose>
-    <path>polza_dashboard.py</path>
+    <path>embeddings/qdrant.py</path>
     <depends>M-EMBEDDING</depends>
     <annotations>
       <fn-_get_qdrant_client PURPOSE="Lazy init Qdrant client — returns None if qdrant_client not installed or QDRANT_ENABLED=false. No crash on missing dependency." />
@@ -346,8 +408,8 @@
 
   <M-AUTO-ANALYZE NAME="Auto-Analyze Callback" TYPE="CORE_LOGIC">
     <purpose>SyncWorker callback that auto-analyzes new records after each sync cycle when toggle is ON. Runs in sync worker thread.</purpose>
-    <path>polza_dashboard.py</path>
-    <depends>M-SYNC, M-LLM-PROVIDER, M-EMBEDDING, M-QDRANT, M-GEN-SUMMARY-STORE</depends>
+    <path>workers/analyze_all.py</path>
+    <depends>M-SYNC, M-PROVIDERS, M-EMBEDDINGS, M-GEN-SUMMARY-STORE</depends>
     <annotations>
       <fn-_auto_analyze_new_records PURPOSE="Callback: receives new_gen_ids from SyncWorker, filters already-analyzed, calls _analyze_single_gen for each" />
       <config-AUTO_ANALYZE PURPOSE="Env toggle AUTO_ANALYZE=true|false. Also switchable at runtime via /api/provider/set {autoAnalyze: bool}" />
