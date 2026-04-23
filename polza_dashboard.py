@@ -1093,7 +1093,7 @@ def _summarize_single_session(session_id: str):
     # START_BLOCK_CALL_LLM
     llm_payload = {
         "model": LLM_MODEL,
-        "max_tokens": 700,
+        "max_tokens": 1000,
         "temperature": 0.3,
         # cache_control on system prompt → Anthropic reuses cached prefix
         "system": [
@@ -1224,7 +1224,7 @@ GEN_SUMMARIZE_PROMPT = """Ты — аналитик корпоративного
 Верни СТРОГО JSON в таком формате (без markdown, без комментариев, только JSON):
 
 {
-  "summary": "Подробное описание (3-5 предложений, русский). Укажи: (1) что сотрудник делает — конкретное действие/задача; (2) контекст или проект, если ясен; (3) используемые технологии/инструменты; (4) цель или ожидаемый результат. Избегай общих фраз — только конкретика из промпта.",
+  "summary": "Подробное описание (6-8 предложений, русский). Укажи: (1) что сотрудник делает — конкретное действие/задача; (2) контекст или проект, если ясен; (3) используемые технологии/инструменты; (4) цель или ожидаемый результат; (5) какие входные данные или код анализируются; (6) какие выходные данные или результат ожидается; (7) связь с бизнес-процессами. Избегай общих фраз — только конкретика из промпта.",
   "topic": "Основная тема (2-5 слов, русский, например: 'Рефакторинг Python API', 'Отладка SQL', 'Документация React')",
   "is_work": true,
   "project_guess": "Название/описание проекта 1 фразой, если угадывается из кода или контекста. Иначе null.",
@@ -1299,7 +1299,7 @@ def _llm_call_anthropic(user_text: str):
     """Call Anthropic Claude API. Returns (parsed_dict, usage_info)."""
     llm_payload = {
         "model": LLM_MODEL,
-        "max_tokens": 600,
+        "max_tokens": 900,
         "temperature": 0.2,
         "system": [
             {
@@ -1417,7 +1417,7 @@ def _llm_call_openrouter(user_text: str):
     model = _provider_state.get("openrouter_model", OPENROUTER_MODEL)
     payload = {
         "model": model,
-        "max_tokens": 600,
+        "max_tokens": 900,
         "temperature": 0.2,
         "reasoning": {"enabled": False},
         "response_format": {"type": "json_object"},

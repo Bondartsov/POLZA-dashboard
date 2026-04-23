@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<VerificationPlan VERSION="0.5.1">
+<VerificationPlan VERSION="0.5.2">
   <!-- CHANGELOG:
+         0.5.2 (2026-04-23): Phase-4d "Model Selector + Prompt Tuning".
+                             New critical flow: VF-013 (model switch scenario — switch to Gemma, analyze, verify model in response).
+                             Updated V-M-LLM-PROVIDER for openrouter_model checks.
+                             Updated V-M-LLM-GEN-SUMMARIZE for 6-8 sentence summary verification.
          0.5.1 (2026-04-23): Phase-4c "OpenRouter Cloud Free Provider".
                              New critical flow: VF-012 (OpenRouter provider analyze).
                              Updated V-M-LLM-PROVIDER for openrouter checks.
@@ -160,6 +164,23 @@
       </required-signals>
     </VF-012>
 
+    <VF-013 NAME="OpenRouter model switch scenario" USE_CASES="UC-002" DATA_FLOW="DF-008" PRIORITY="high">
+      <scenario>User switches Cloud Free model from Nemotron to Gemma 4 via dropdown, then analyzes a generation. Verify response uses selected model.</scenario>
+      <expected-outcome>
+        POST /api/provider/set {openrouterModel: "google/gemma-4-31b-it:free"} updates _provider_state.openrouter_model.
+        GET /api/provider/config returns selected openrouter_model.
+        Next /api/generation/summarize with openrouter active uses the selected model.
+        Response llmModel field matches selected model ID.
+        Summary is 6-8 sentences (updated prompt output).
+        Switching back to nvidia/nemotron-31b-it:free works — next analysis uses Nemotron.
+      </expected-outcome>
+      <required-signals>
+        <log-marker>[Provider] openrouter_model set to google/gemma-4-31b-it:free</log-marker>
+        <log-marker>[GenSummarize][LLM] ok provider=openrouter model=google/gemma-4-31b-it:free</log-marker>
+        <log-marker>[GenSummaryStore][upsert] cached generation_id=...</log-marker>
+      </required-signals>
+    </VF-013>
+
   </CriticalFlows>
 
   <ModuleVerification>
@@ -240,6 +261,7 @@
         <scenario-6 kind="failure">Anthropic 429 (rate limit): error returned in JSON with details, UI-visible, not crash</scenario-6>
         <scenario-7 kind="success">Phase-4: LLM + embed run in parallel — both PostgreSQL and Qdrant receive data on first call</scenario-7>
         <scenario-8 kind="success">Phase-4: Ollama provider returns valid summary JSON via _parse_llm_json with think:false</scenario-8>
+        <scenario-9 kind="success">Summary text is 6-8 sentences (updated prompt). max_tokens=900 for gen, 1000 for session.</scenario-9>
       </scenarios>
       <required-log-markers>
         <marker-1>[GenSummarize][LLM] ok input=N output=N cost=$...</marker-1>
@@ -258,6 +280,8 @@
         <check-4>curl -s -X POST http://localhost:5000/api/provider/set -H "Content-Type: application/json" -d '{"provider":"anthropic"}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('ok')==True"</check-4>
         <check-5>curl -s -X POST http://localhost:5000/api/provider/set -H "Content-Type: application/json" -d '{"provider":"openrouter"}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('ok')==True"</check-5>
         <check-6>curl -s http://localhost:5000/api/provider/config | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['provider']=='openrouter'"</check-6>
+        <check-7>curl -s -X POST http://localhost:5000/api/provider/set -H "Content-Type: application/json" -d '{"provider":"openrouter","openrouterModel":"nvidia/nemotron-31b-it:free"}' | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('ok')==True"</check-7>
+        <check-8>curl -s http://localhost:5000/api/provider/config | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('openrouter_model')=='nvidia/nemotron-31b-it:free'"</check-8>
       </module-checks>
       <scenarios>
         <scenario-1 kind="success">GET /api/provider/config returns all three providers with model/cost info</scenario-1>
@@ -268,6 +292,8 @@
         <scenario-6 kind="failure">Invalid provider name in /api/provider/set returns error JSON, not crash</scenario-6>
         <scenario-7 kind="failure">Ollama unreachable: _llm_call_ollama returns error, not crash — graceful degradation</scenario-7>
         <scenario-8 kind="failure">OpenRouter unreachable or invalid key: _llm_call_openrouter returns error, not crash — graceful degradation</scenario-8>
+        <scenario-9 kind="success">POST /api/provider/set with openrouterModel param updates _provider_state.openrouter_model</scenario-9>
+        <scenario-10 kind="success">GET /api/provider/config returns openrouter_model field and openrouter_models registry with 2+ models</scenario-10>
       </scenarios>
       <required-log-markers>
         <marker-1>[Provider] switched to ollama/anthropic/openrouter</marker-1>

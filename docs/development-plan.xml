@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<DevelopmentPlan VERSION="0.5.1">
+<DevelopmentPlan VERSION="0.5.2">
   <!-- CHANGELOG:
+         0.5.2 (2026-04-23): Phase-4d "Model Selector + Prompt Tuning".
+                             Updated GEN_SUMMARIZE_PROMPT: summary 6-8 sentences (was 3-5).
+                             Updated max_tokens: 900 for generation summarize (was 600), 1000 for session summarize (was 700).
+                             Added OPENROUTER_MODELS registry with 2 models (Nemotron + Gemma 4).
+                             Updated M-PROVIDER-UI: model selector dropdown under Cloud Free radio.
+                             Updated _provider_state: openrouter_model field, runtime switchable.
          0.5.1 (2026-04-23): Phase-4c "OpenRouter Cloud Free Provider".
                              Added OpenRouter (Gemma 4 31B free) as third LLM provider.
                              Updated: M-LLM-PROVIDER (_llm_call_openrouter, OPENROUTER_* env vars),
@@ -294,7 +300,7 @@
       </observability>
       <verification-ref>V-M-LLM-GEN-SUMMARIZE</verification-ref>
       <notes>
-        <note-1>Strict JSON-output prompt asks for 3-5 sentence detailed summary with action, context, technologies, goal. Schema: summary, topic, is_work, project_guess, risk_flags[].</note-1>
+        <note-1>Strict JSON-output prompt asks for 6-8 sentence detailed summary with action, context, technologies, goal. Schema: summary, topic, is_work, project_guess, risk_flags[]. max_tokens=900 (was 600).</note-1>
         <note-2>risk_flags values: personal, off_hours, unusual_model, high_cost, sensitive.</note-2>
         <note-3>Cost ~$0.002 per first call (Anthropic). Repeat calls from DB cache are $0 and ~5-10ms response.</note-3>
         <note-4>Phase-4: Now runs LLM call + embedding in PARALLEL via ThreadPoolExecutor. Stores result in both PostgreSQL (generation_summaries) and Qdrant (Polza_user_logs).</note-4>
@@ -336,6 +342,7 @@
         <note-2>/no_think in prompt text doesn't work — must use the API-level think:false parameter.</note-2>
         <note-3>Qwen output may include &lt;think&gt;...&lt;/think&gt; wrapper or markdown fences — _parse_llm_json strips these.</note-3>
         <note-4>OpenRouter uses OpenAI-compatible /v1/chat/completions with Bearer auth. Model: google/gemma-4-31b-it:free. Cost: $0 (free tier). Response parsed from choices[0].message.content via _parse_llm_json.</note-4>
+        <note-5>OPENROUTER_MODELS registry lists available models (Nemotron 31B, Gemma 4 31B). _provider_state.openrouter_model stores selected model, switchable via /api/provider/set {openrouterModel: "..."}.</note-5>
       </notes>
     </M-LLM-PROVIDER>
 
@@ -409,6 +416,7 @@
       <notes>
         <note-1>Radio options: On-Prem (Qwen) — free, ~2-5s; Cloud (Haiku) — ~$0.002, ~3s; Cloud Free (Gemma 4 31B) — $0.00.</note-1>
         <note-2>AI section now shows provider badge and 🔵 Embedded indicator when vector stored in Qdrant.</note-2>
+        <note-3>Cloud Free radio has model selector dropdown populated from OPENROUTER_MODELS registry. Selection stored in _provider_state.openrouter_model.</note-3>
       </notes>
     </M-PROVIDER-UI>
 

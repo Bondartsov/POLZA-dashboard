@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 3.6.0 -->
+<!-- VERSION: 3.7.0 -->
 <!-- CHANGELOG:
+       3.7.0 (2026-04-23): Phase-4d "Model Selector + Prompt Tuning".
+                           Added OPENROUTER_MODELS registry (Nemotron + Gemma 4), UI dropdown under Cloud Free radio.
+                           Added openrouter_model field to _provider_state, switchable via /api/provider/set openrouterModel param.
+                           Updated GEN_SUMMARIZE_PROMPT: summary now 6-8 sentences (was 3-5).
+                           Updated max_tokens: 900 for gen (was 600), 1000 for session (was 700).
        3.6.0 (2026-04-23): Phase-4c "OpenRouter Cloud Free Provider".
                            Added OpenRouter (Gemma 4 31B free) as third LLM provider.
                            Updated M-LLM-PROVIDER: _llm_call_openrouter, OPENROUTER_* env vars.
@@ -29,7 +34,7 @@
        3.1.0: Session summaries, 95-chunk SocratiCode index.
 -->
 
-<KnowledgeGraph project="polza-dashboard" version="3.6.0">
+<KnowledgeGraph project="polza-dashboard" version="3.7.0">
 
   <M-APP NAME="Flask App" TYPE="ENTRY_POINT">
     <purpose>Flask web-server v3: DB-backed API + proxy for detail/log + background backfill + per-generation AI summarize</purpose>
@@ -52,7 +57,7 @@
       <fn-gen_summary_delete PURPOSE="DELETE /api/generation/summary — drop cache, force regeneration" />
       <fn-session_summarize PURPOSE="POST /api/session/summarize — session-level summary (only when session_id exists)" />
       <fn-provider_config PURPOSE="GET /api/provider/config — returns current provider, available providers with model/cost info, autoAnalyze state" />
-      <fn-provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama|openrouter, autoAnalyze?: bool}. Switches _provider_state at runtime" />
+      <fn-provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama|openrouter, autoAnalyze?: bool, openrouterModel?: str}. Switches _provider_state at runtime" />
       <fn-analysis_stats PURPOSE="GET /api/analysis-stats — always-available endpoint: total/analyzed/remaining counts + current job state from DB" />
       <fn-analyze_all_start PURPOSE="POST /api/analyze-all/start — starts or resumes analyze-all job. State persisted to analysis_state table." />
       <fn-analyze_all_status PURPOSE="GET /api/analyze-all/status — returns DB-backed + in-memory state" />
@@ -201,7 +206,7 @@
       <fn-api_generation_summary_delete PURPOSE="DELETE /api/generation/summary?generationId=... — drop from cache, forces regeneration on next call." />
       <fn-llm_call_summarize PURPOSE="Helper: dispatches to _llm_call_anthropic or _llm_call_ollama based on _provider_state, parses JSON, computes cost. Raises on HTTP non-200 or empty content." />
       <fn-extract_user_text_from_log PURPOSE="Helper: concatenate user-role messages from Polza log (fallback to any-role content if empty), cap at 4000 chars." />
-      <prompt-GEN_SUMMARIZE_PROMPT PURPOSE="Extended prompt — requests 3-5 sentence detailed summary with action, context, technologies, goal. Strict JSON output schema." />
+      <prompt-GEN_SUMMARIZE_PROMPT PURPOSE="Extended prompt — requests 6-8 sentence detailed summary with action, context, technologies, goal. Strict JSON output schema. max_tokens=900 for gen, 1000 for session." />
       <block-marker>START_BLOCK_GEN_SUMMARIZE_PROMPT / START_BLOCK_GEN_SUMMARIZE_HELPERS / START_BLOCK_GEN_CACHE_CHECK / START_BLOCK_GEN_CALL_LLM / START_BLOCK_GEN_CACHE_STORE</block-marker>
       <log-prefix>[GenSummarize]</log-prefix>
       <output-schema>{generationId, summary, topic, isWork, projectGuess, riskFlags[], llmModel, llmCost, cacheCreationTokens, cacheReadTokens, inputTokens, outputTokens, cached}</output-schema>
@@ -262,8 +267,9 @@
       <fn-_llm_call_summarize PURPOSE="Dispatcher: reads _provider_state, routes to _llm_call_anthropic or _llm_call_ollama or _llm_call_openrouter" />
       <fn-_parse_llm_json PURPOSE="Robust JSON extraction — strips &lt;think&gt; tags, markdown fences, extracts first valid JSON object" />
       <fn-api_provider_config PURPOSE="GET /api/provider/config — returns {provider, providers: [{id, name, model, cost_info}]}" />
-      <fn-api_provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama}. Updates _provider_state dict at runtime." />
-      <config-_provider_state PURPOSE="Runtime dict: {provider: str}. Defaults to LLM_PROVIDER env var. Switchable via API." />
+      <fn-api_provider_set PURPOSE="POST /api/provider/set — body: {provider: anthropic|ollama|openrouter, openrouterModel?: str}. Updates _provider_state dict at runtime." />
+      <config-_provider_state PURPOSE="Runtime dict: {provider: str, openrouter_model: str}. Defaults to LLM_PROVIDER env var. Switchable via API." />
+      <config-OPENROUTER_MODELS PURPOSE="Registry of available OpenRouter models: [{id, name, description}]. Currently: nvidia/gemma-4-31b-it:free (Gemma 4 31B) + nvidia/nemotron-31b-it:free (Nemotron 31B). Populates UI dropdown." />
       <config-OLLAMA_BASE_URL PURPOSE="Ollama server URL, default http://localhost:11434" />
       <config-OLLAMA_CHAT_MODEL PURPOSE="Ollama chat model, default qwen3.5:4b" />
       <config-OLLAMA_EMBED_MODEL PURPOSE="Ollama embedding model, default nomic-embed-text-v2-moe:latest" />
@@ -316,7 +322,8 @@
       <fn-loadProviderConfig PURPOSE="GET /api/provider/config on page load — populate radio state and provider info labels" />
       <fn-setProvider PURPOSE="POST /api/provider/set on radio click — switch provider, update UI labels and badge" />
       <ui-radio PURPOSE="Radio buttons: On-Prem (Qwen) — free, ~2-5s / Cloud (Haiku) — ~$0.002, ~3s / Cloud Free (Gemma 4 31B) — $0.00" />
-      <ui-radio_openrouter PURPOSE="Radio button: Cloud Free — Gemma 4 31B · $0.00" />
+      <ui-radio_openrouter PURPOSE="Radio button: Cloud Free — dropdown with OPENROUTER_MODELS (Nemotron 31B, Gemma 4 31B) · $0.00" />
+      <ui-or-model-dropdown PURPOSE="Dropdown under Cloud Free radio — populated from OPENROUTER_MODELS registry. Selected model stored in _provider_state.openrouter_model." />
       <ui-provider_badge PURPOSE="AI section shows provider label next to analysis result" />
       <ui-vector_badge PURPOSE="Embedded indicator when vector stored in Qdrant" />
       <css-classes>provider-toggle, provider-option, provider-info, provider-badge, vector-badge</css-classes>

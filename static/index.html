@@ -91,6 +91,30 @@
       <p><kbd style="background:var(--bg4);padding:1px 4px;border-radius:3px">ESC</kbd> закрыть модалку / sidebar</p>
     </div>
   </div>
+  <div class="sidebar-section">
+    <h3 style="cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">📖 Справка моделей ▾</h3>
+    <div style="display:none;font-size:10px;color:var(--text2);line-height:1.5">
+      <p><b>🏠 On-Prem · Qwen 3.5 4B</b><br>
+        Локальная модель через Ollama. Бесплатно, без лимитов.<br>
+        ctx: 32K · temp: default · tokens: не ограничены<br>
+        Timeout: 120 сек · Embeddings: nomic-embed-text</p>
+      <p><b>☁️ Cloud · Claude Haiku 4.5</b><br>
+        Anthropic API. Быстрая, качественная.<br>
+        ctx: 200K · temp: 0.2 · max_tokens: 900<br>
+        Prompt caching включён · ~$0.002/запрос</p>
+      <p><b>🌐 Nemotron 3 Super 120B</b><br>
+        OpenRouter free. NVIDIA MoE (12B active).<br>
+        ctx: 256K · temp: 0.2 · max_tokens: 900<br>
+        Reasoning: OFF · response_format: JSON<br>
+        Retry: 4x при 429 (backoff 2→4→8→16 сек)</p>
+      <p><b>🌐 Gemma 4 31B</b><br>
+        OpenRouter free. Google dense 30.7B.<br>
+        ctx: 256K · temp: 0.2 · max_tokens: 900<br>
+        Reasoning: OFF · response_format: JSON<br>
+        BYOK рекомендуется для стабильности</p>
+      <p style="margin-top:4px;font-size:9px;color:var(--text3)">Все модели получают промпт сотрудника (до 4000 символов) и возвращают JSON: summary (6-8 предложений), topic, is_work, project_guess, risk_flags.</p>
+    </div>
+  </div>
 </div>
 
 <!-- Topbar -->
