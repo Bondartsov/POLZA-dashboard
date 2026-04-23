@@ -1089,12 +1089,13 @@ async function pollAnalyzeAllStatus() {
 
     if (job.status === 'running') {
       const eta = job.done > 0 ? _estimateEta(job) : '';
+      const prov = getProviderLabel();
       showProgress(
-        `🧠 AI-анализ: ${job.done} готово / ${data.remaining} осталось (${job.errors} ош.) ${eta}`,
+        `🧠 AI-анализ (${prov}): ${job.done} готово / ${data.remaining} осталось (${job.errors} ош.) ${eta}`,
         pct
       );
       const pt = document.getElementById('progressText');
-      pt.innerHTML = `🧠 AI-анализ: <b>${job.done}</b>/${total} (${pct}%) · ${data.remaining} осталось ${eta}
+      pt.innerHTML = `🧠 AI-анализ (<b>${prov}</b>): <b>${job.done}</b>/${total} (${pct}%) · ${data.remaining} осталось ${eta}
         <button class="btn btn-small" style="margin-left:8px;padding:2px 10px" onclick="toggleAnalyzeAllPause()">⏸ Пауза</button>
         <button class="btn btn-small btn-danger" style="margin-left:4px;padding:2px 10px" onclick="stopAnalyzeAll()">⏹ Стоп</button>`;
       // Refresh table periodically
@@ -1103,9 +1104,10 @@ async function pollAnalyzeAllStatus() {
         renderTable();
       }
     } else if (job.status === 'paused') {
-      showProgress(`⏸ AI-анализ на паузе: ${job.done} готово, ${data.remaining} осталось`, pct);
+      const prov = getProviderLabel();
+      showProgress(`⏸ AI-анализ (${prov}) на паузе: ${job.done} готово, ${data.remaining} осталось`, pct);
       const pt = document.getElementById('progressText');
-      pt.innerHTML = `⏸ AI-анализ на паузе: <b>${job.done}</b>/${total} (${pct}%) · ${data.remaining} осталось
+      pt.innerHTML = `⏸ AI-анализ (<b>${prov}</b>) на паузе: <b>${job.done}</b>/${total} (${pct}%) · ${data.remaining} осталось
         <button class="btn btn-small" style="margin-left:8px;padding:2px 10px" onclick="resumeAnalyzeAll()">▶ Продолжить</button>
         <button class="btn btn-small btn-danger" style="margin-left:4px;padding:2px 10px" onclick="stopAnalyzeAll()">⏹ Стоп</button>`;
     } else {
