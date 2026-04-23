@@ -181,7 +181,7 @@ async function loadProviderConfig() {
     }
     if (cfg.openrouter) {
       const ori = document.getElementById('providerOpenRouterInfo');
-      if (ori) ori.textContent = `Gemma 4 31B · $0.00`;
+      if (ori) ori.textContent = `Nemotron 3 · $0.00`;
     }
     // Auto-analyze checkbox
     const aa = document.getElementById('autoAnalyzeSwitch');
@@ -218,7 +218,7 @@ async function toggleAutoAnalyze() {
 
 function getProviderLabel() {
   if (S.provider === 'ollama') return 'Qwen · бесплатно';
-  if (S.provider === 'openrouter') return 'Gemma 4 · бесплатно';
+  if (S.provider === 'openrouter') return 'Nemotron 3 · бесплатно';
   return 'Haiku · ~$0.002';
 }
 
@@ -1234,7 +1234,7 @@ function renderAiSection(genId, li) {
 
 async function runGenAnalysis(genId, force = false) {
   const block = document.getElementById(`aiBlock_${genId}`);
-  const providerName = S.provider === 'ollama' ? 'Qwen' : S.provider === 'openrouter' ? 'Gemma 4' : 'Claude Haiku';
+  const providerName = S.provider === 'ollama' ? 'Qwen' : S.provider === 'openrouter' ? 'Nemotron 3' : 'Claude Haiku';
   if (block) {
     block.innerHTML = `
       <div class="ai-block-header">
