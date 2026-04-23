@@ -1406,6 +1406,8 @@ def _llm_call_openrouter(user_text: str):
         "model": OPENROUTER_MODEL,
         "max_tokens": 600,
         "temperature": 0.2,
+        "reasoning": {"enabled": False},
+        "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": GEN_SUMMARIZE_PROMPT},
             {"role": "user", "content": f"Запрос пользователя к AI-модели:\n\n{user_text}"},
