@@ -51,8 +51,15 @@ def api_analysis_stats():
 @analyze_bp.route("/api/analyze-all/start", methods=["POST"])
 def api_analyze_all_start():
     with _analyze_all["lock"]:
-        if _analyze_all["running"]:
+        if _analyze_all["running"] and not _analyze_all.get("paused"):
             return jsonify({"status": "already_running"})
+
+        # If running but paused — resume by unpausing
+        if _analyze_all["running"] and _analyze_all.get("paused"):
+            _analyze_all["paused"] = False
+            update_analysis_state(status="running")
+            print("[AnalyzeAll] resumed from pause")
+            return jsonify({"status": "resumed", "provider": _provider_state.get("provider", "ollama")})
 
         prev_state = get_analysis_state()
         if prev_state.status == "paused" and (prev_state.done or 0) > 0:
