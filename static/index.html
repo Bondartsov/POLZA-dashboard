@@ -57,7 +57,12 @@
           <option value="google/gemma-4-31b-it:free">Gemma 4 31B</option>
         </select>
       </div>
-      <label class="auto-analyze-toggle" style="margin-top:6px">
+      <label class="auto-analyze-toggle" style="margin-top:4px">
+        <input type="checkbox" id="defaultProviderSwitch" onchange="setDefaultProvider()">
+        <span>📌 По умолчанию</span>
+        <span id="defaultProviderBadge" style="font-size:9px;color:var(--text3);margin-left:2px"></span>
+      </label>
+      <label class="auto-analyze-toggle" style="margin-top:2px">
         <input type="checkbox" id="autoAnalyzeSwitch" onchange="toggleAutoAnalyze()">
         <span>🤖 Авто-анализ новых</span>
       </label>

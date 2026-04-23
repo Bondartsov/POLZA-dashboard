@@ -192,6 +192,8 @@ async function loadProviderConfig() {
     // Auto-analyze checkbox
     const aa = document.getElementById('autoAnalyzeSwitch');
     if (aa) aa.checked = cfg.autoAnalyze === true;
+    // Default provider badge — show what's saved in .env
+    updateDefaultBadge(cfg);
   } catch(e) { console.warn('provider config load failed:', e); }
 }
 
@@ -220,7 +222,39 @@ async function setOpenRouterModel(model) {
     });
     if (!r.ok) return;
     if (S.providerConfig && S.providerConfig.openrouter) S.providerConfig.openrouter.model = model;
+    if (document.getElementById('defaultProviderSwitch')?.checked) updateDefaultBadge(S.providerConfig);
   } catch(e) { console.warn('openrouter model switch failed:', e); }
+}
+
+async function setDefaultProvider() {
+  const checked = document.getElementById('defaultProviderSwitch').checked;
+  if (checked) {
+    // Save current provider to .env via backend
+    try {
+      await fetch('/api/provider/set', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({saveDefault: true}),
+      });
+      updateDefaultBadge(S.providerConfig);
+    } catch(e) { console.warn('save default failed:', e); }
+  } else {
+    document.getElementById('defaultProviderBadge').textContent = '';
+  }
+}
+
+function updateDefaultBadge(cfg) {
+  const badge = document.getElementById('defaultProviderBadge');
+  const cb = document.getElementById('defaultProviderSwitch');
+  if (!badge || !cfg) return;
+  const saved = cfg.savedDefault || '';
+  const current = cfg.provider + (cfg.provider === 'openrouter' && cfg.openrouter ? '/' + cfg.openrouter.model : '');
+  if (saved === current) {
+    badge.textContent = '(сохранено)';
+    if (cb) cb.checked = true;
+  } else {
+    badge.textContent = '';
+  }
 }
 
 async function toggleAutoAnalyze() {

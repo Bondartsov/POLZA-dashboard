@@ -248,6 +248,10 @@ def api_provider_config():
         config["activeModel"] = LLM_MODEL
         config["activeCost"] = "~$0.002"
         config["activeEstimate"] = "~2-3 сек"
+    # Saved default for badge
+    saved_provider = os.environ.get("LLM_PROVIDER", "ollama")
+    saved_model = os.environ.get("OPENROUTER_MODEL", OPENROUTER_MODEL)
+    config["savedDefault"] = saved_provider + ("/" + saved_model if saved_provider == "openrouter" else "")
     return jsonify(config)
 
 
