@@ -1,7 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 4.0.0 -->
+<!-- VERSION: 5.0.0 -->
 <!-- CHANGELOG:
+       5.0.0 (2026-04-25): Phase-6 "Chat with Vectors" — RAG-чат поверх Qdrant.
+                           New modules: M-RAG-SEARCH, M-RAG-CHAT, M-CHAT-UI.
+                           New package: rag/ with search.py, chat.py, prompts.py.
+                           New route: routes/chat.py (Blueprint).
+                           New frontend: static/chat.js + static/chat.css.
+                           LLM: NVIDIA Nemotron 3 Nano 30B A3B (free) via OpenRouter.
+                           Features: semantic search in Qdrant (6627 vectors, 768-dim cosine),
+                           context enrichment from generation_summaries (PostgreSQL),
+                           hybrid search with employee name detection (12 employees),
+                           streaming SSE responses, slide-in chat panel UI.
+       4.0.0 (2026-04-23): Major refactoring — monolithic polza_dashboard.py (2168 lines) split into modular packages.
        4.0.0 (2026-04-23): Major refactoring — monolithic polza_dashboard.py (2168 lines) split into modular packages.
                            New modules: M-CONFIG, M-PROVIDERS, M-EMBEDDINGS, M-WORKERS, M-ROUTES.
                            M-APP now entrypoint only (main function). All routes, providers, workers, embeddings
@@ -39,7 +50,7 @@
        3.1.0: Session summaries, 95-chunk SocratiCode index.
 -->
 
-<KnowledgeGraph project="polza-dashboard" version="4.0.0">
+<KnowledgeGraph project="polza-dashboard" version="5.0.0">
 
   <M-APP NAME="Flask App Entrypoint" TYPE="ENTRY_POINT">
     <purpose>Minimal entrypoint: creates Flask app from config, registers all route blueprints, starts background workers, runs server. Only contains main() function.</purpose>
@@ -419,6 +430,84 @@
     </annotations>
   </M-AUTO-ANALYZE>
 
+  <!-- ═══ PHASE-6 MODULES (Chat with Vectors — RAG) ═══ -->
+
+  <M-RAG-SEARCH NAME="RAG Retrieval Engine" TYPE="CORE_LOGIC">
+    <purpose>Vector search pipeline: embed user query → search Qdrant → detect employee filters → enrich results from PostgreSQL generation_summaries. Returns structured sources for RAG context building.</purpose>
+    <path>rag/search.py, rag/prompts.py</path>
+    <depends>M-CONFIG, M-EMBEDDING, M-QDRANT, M-GEN-SUMMARY-STORE</depends>
+    <annotations>
+      <fn-_rag_search PURPOSE="Main retrieval entry: embed query → Qdrant search + optional employee filter → enrich from DB → return sources list" />
+      <fn-_embed_query PURPOSE="Embed user query via Ollama nomic-embed-text-v2-moe — reuses _embed_text from embeddings package" />
+      <fn-_detect_employee_filter PURPOSE="Parse query text for known employee names (from api_keys table) → returns Qdrant filter dict or None" />
+      <fn-_qdrant_hybrid_search PURPOSE="Dual search: semantic (always) + filtered by employee name (if detected). Merge and dedup by generation_id, top 20 by score" />
+      <fn-_enrich_sources PURPOSE="For each Qdrant result, fetch full summary from generation_summaries (PostgreSQL). Returns [{id, score, summary, topic, employee, model, created_at, risk_flags}]" />
+      <fn-_build_context_block PURPOSE="Format enriched sources into structured text block for RAG system prompt" />
+      <fn-RAG_SYSTEM_PROMPT PURPOSE="System prompt for Nemotron Nano: analyst role, citation rules, Russian language, markdown formatting" FILE="rag/prompts.py" />
+      <config-RAG_CHAT_MODEL PURPOSE="Fixed model for RAG chat: nvidia/nemotron-3-nano-30b-a3b:free — independent of summarize provider toggle" />
+      <config-RAG_MAX_SOURCES PURPOSE="Maximum sources to return from search (default 20)" />
+      <config-RAG_MIN_SCORE PURPOSE="Minimum cosine similarity score threshold (default 0.3) — below this, sources excluded" />
+      <data-qdrant_state PURPOSE="6627 vectors (2026-04-25), 768-dim cosine, collection Polza_user_logs. Payload: generation_id, user_text_snippet(200), topic, is_work, session_id, api_key_name, model_used, created_at" />
+      <data-db_state PURPOSE="11027 total generations, 6680 analyzed with summaries in generation_summaries" />
+      <data-employees PURPOSE="12 employees: AI-Reviewer, Боровиков Алексей, Иванков Николай, Кузьмицкий Александр, Наточий Александр, Основной ключ, Радько Кирилл, Сапач Андрей, Тесленко Павел, Филатов Дмитрий, Хромов Артём, Ягудин Александр" />
+      <log-prefix>[RAG][Search]</log-prefix>
+    </annotations>
+  </M-RAG-SEARCH>
+
+  <M-RAG-CHAT NAME="RAG Chat Engine" TYPE="CORE_LOGIC">
+    <purpose>Chat session management + streaming LLM generation for RAG responses. Maintains in-memory conversation history, builds OpenRouter messages with RAG context, streams tokens via SSE.</purpose>
+    <path>rag/chat.py</path>
+    <depends>M-CONFIG, M-RAG-SEARCH, M-PROVIDERS</depends>
+    <annotations>
+      <fn-_chat_new_session PURPOSE="Create new chat session (UUID), return session_id" />
+      <fn-_chat_add_message PURPOSE="Append message to session history. Trim to last 20 messages max." />
+      <fn-_build_rag_messages PURPOSE="Build OpenRouter messages array: system prompt + RAG context block + conversation history + user message" />
+      <fn-_stream_chat_response PURPOSE="Call OpenRouter streaming API with Nemotron Nano model. Yield SSE events: sources, token, done." />
+      <fn-_cleanup_expired_sessions PURPOSE="Remove sessions older than 2 hours. Called periodically." />
+      <fn-api_chat_message PURPOSE="POST /api/chat/message — SSE endpoint: {session_id, message} → text/event-stream" FILE="routes/chat.py" />
+      <fn-api_chat_new PURPOSE="POST /api/chat/new — create new session, returns {session_id}" FILE="routes/chat.py" />
+      <fn-api_chat_status PURPOSE="GET /api/chat/status — returns {qdrant_vectors, model, available}" FILE="routes/chat.py" />
+      <config-RAG_CHAT_MODEL PURPOSE="nvidia/nemotron-3-nano-30b-a3b:free — 256K context, free, streaming" />
+      <config-RAG_MAX_HISTORY PURPOSE="Max messages per session (default 20)" />
+      <config-RAG_SESSION_TTL PURPOSE="Session expiry time in seconds (default 7200 = 2 hours)" />
+      <config-RAG_MAX_TOKENS PURPOSE="max_tokens for chat response (default 2000)" />
+      <config-RAG_TEMPERATURE PURPOSE="temperature for chat response (default 0.3)" />
+      <sse-protocol PURPOSE="Event types: sources (pre-generation), token (streaming), done (final stats)" />
+      <constraint-independent_model PURPOSE="Chat LLM is separate from summarize provider toggle. Always uses Nemotron Nano on OpenRouter. No provider switching for chat." />
+      <constraint-no_db_persist PURPOSE="Chat sessions are in-memory only. No DB storage for privacy. History survives page refresh via localStorage on frontend." />
+      <log-prefix>[RAG][Chat]</log-prefix>
+    </annotations>
+  </M-RAG-CHAT>
+
+  <M-CHAT-UI NAME="Chat Panel UI" TYPE="UI_COMPONENT">
+    <purpose>Slide-in chat panel (right side) for RAG conversations. Self-contained in chat.js + chat.css, minimal integration with existing SPA. Shows streaming AI responses with source citations.</purpose>
+    <path>static/chat.js, static/chat.css</path>
+    <depends>M-STATIC (topbar button mount), M-RAG-CHAT</depends>
+    <annotations>
+      <fn-initChat PURPOSE="Self-initialize on DOMContentLoaded: add topbar button, create panel HTML, bind events" />
+      <fn-toggleChat PURPOSE="Open/close chat panel (slide animation)" />
+      <fn-sendMessage PURPOSE="POST /api/chat/message with SSE consumption via fetch ReadableStream" />
+      <fn-renderSources PURPOSE="Show source chips bar (found N sources) before AI response starts" />
+      <fn-renderToken PURPOSE="Append streaming token to current AI message bubble" />
+      <fn-renderDone PURPOSE="Finalize AI message, show clickable source links, update stats" />
+      <fn-newChat PURPOSE="POST /api/chat/new, clear panel messages, reset state" />
+      <fn-renderMarkdown PURPOSE="Basic markdown rendering: bold, lists, headers in chat bubbles" />
+      <ui-layout PURPOSE="Slide-in panel from right (400px width). Header with title + close. Messages area scrollable. Input bar fixed bottom." />
+      <ui-sources_bar PURPOSE="Before AI response: '💡 Найдено N источников (релевантность X%)'" />
+      <ui-source_chip PURPOSE="Clickable chip per source: generation_id[:8] + topic. Click → opens existing detail modal." />
+      <ui-message_bubble PURPOSE="User messages: right-aligned, blue. AI messages: left-aligned, dark. Markdown rendered." />
+      <ui-input_bar PURPOSE="Fixed bottom: textarea + send button. Enter to send, Shift+Enter for newline." />
+      <ui-topbar_button PURPOSE="💬 Спросить ИИ button in existing topbar, next to stats counter" />
+      <ui-empty_state PURPOSE="Welcome message: 'Спрашивайте что угодно о данных команды. Например: Что делал Радько на этой неделе?'" />
+      <ui-theme PURPOSE="Inherits dark/light theme from existing page. CSS variables reused." />
+      <css-file>static/chat.css</css-file>
+      <js-file>static/chat.js</js-file>
+      <integration-index-html PURPOSE="Add 3 lines to index.html: chat.css link, chat.js script, panel div mount point" />
+      <integration-no-appjs PURPOSE="Zero changes to app.js. Chat self-initializes via DOMContentLoaded and mounts to existing topbar." />
+      <constraint-chatjs_scope PURPOSE="chat.js is self-contained (~300 lines). Does NOT import or modify app.js state. Communicates only via API calls." />
+    </annotations>
+  </M-CHAT-UI>
+
   <Constraints>
     <constraint-sort>Polza.AI API supports only sortBy=createdAt|clientCost; DB supports all columns</constraint-sort>
     <constraint-cache>cached_tokens in prompt_tokens_details = cache READ (hit); prompt_tokens - cached = cache WRITE (miss)</constraint-cache>
@@ -442,6 +531,11 @@
     <constraint-auto_analyze>AUTO_ANALYZE env toggle + runtime /api/provider/set {autoAnalyze: bool}. SyncWorker.on_new_records callback triggers _analyze_single_gen for each new record after sync.</constraint-auto_analyze>
     <constraint-openrouter_free>OpenRouter Gemma 4 31B is free ($0). Uses OpenAI-compatible /v1/chat/completions with Bearer auth. Response format: choices[0].message.content.</constraint-openrouter_free>
     <constraint-refresh_interval>Frontend auto-refresh interval configurable: 10s/30s/60s/2min/5min dropdown in sidebar. Stored in JS state S.refreshInterval.</constraint-refresh_interval>
+    <constraint-rag_separate_model>RAG chat uses fixed model (Nemotron Nano 30B) independent of summarize provider toggle. No provider switching affects chat.</constraint-rag_separate_model>
+    <constraint-rag_ephemeral_sessions>Chat sessions are in-memory only (Python dict). No DB persistence. Frontend stores history in localStorage for page refresh survival. Auto-cleanup after 2 hours.</constraint-rag_ephemeral_sessions>
+    <constraint-rag_context_source>RAG context comes from Qdrant vectors (retrieval) enriched with generation_summaries (PostgreSQL). user_text_snippet in Qdrant payload is only 200 chars — enrichment from DB summaries (6-8 sentences) provides the real context depth.</constraint-rag_context_source>
+    <constraint-rag_sse_streaming>Chat responses use Server-Sent Events (SSE): Flask returns text/event-stream Response. Frontend consumes via fetch() ReadableStream. Events: sources (pre-gen), token (streaming), done (final).</constraint-rag_sse_streaming>
+    <constraint-rag_min_vectors>RAG chat requires Qdrant to have vectors (currently 6627). If empty, shows "Сначала проанализируйте генерации" error. Minimum recommended: 100 vectors for meaningful results.</constraint-rag_min_vectors>
   </Constraints>
 
 </KnowledgeGraph>

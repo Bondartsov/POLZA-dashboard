@@ -213,6 +213,44 @@
       </required-signals>
     </VF-014>
 
+    <VF-015 NAME="RAG Chat end-to-end" USE_CASES="UC-006" DATA_FLOW="DF-013" PRIORITY="high">
+      <scenario>User opens chat panel, asks "Что делал Радько на этой неделе?", receives streaming response with source citations</scenario>
+      <expected-outcome>
+        SSE stream starts with "sources" event showing found N sources.
+        Then "token" events stream AI response progressively.
+        Response cites specific generations by ID, mentions employee name, dates, topics.
+        "done" event finalizes message with token count.
+        Source chips are visible and clickable (open detail modal).
+      </expected-outcome>
+      <required-signals>
+        <log-marker>[RAG][Search] query="..." found=N sources</log-marker>
+        <log-marker>[RAG][Chat] streaming response session_id=...</log-marker>
+        <log-marker>[RAG][Chat] done tokens=N</log-marker>
+      </required-signals>
+    </VF-015>
+
+    <VF-016 NAME="RAG hybrid search with employee filter" USE_CASES="UC-006" DATA_FLOW="DF-013" PRIORITY="high">
+      <scenario>User asks about specific employee "Кирилл Радько". System detects name, applies Qdrant filter, returns only that employee's data.</scenario>
+      <expected-outcome>
+        Employee name detected from query text.
+        Qdrant search includes filter: api_key_name matches "Радько Кирилл".
+        Results contain only generations from that employee.
+        AI response accurately summarizes that employee's activity.
+      </expected-outcome>
+      <required-signals>
+        <log-marker>[RAG][Search] employee filter: Радько Кирилл</log-marker>
+      </required-signals>
+    </VF-016>
+
+    <VF-017 NAME="RAG Chat no results handling" USE_CASES="UC-006" DATA_FLOW="DF-013" PRIORITY="medium">
+      <scenario>User asks about something not in the data. System finds no relevant vectors.</scenario>
+      <expected-outcome>
+        AI response: "По вашему запросу не найдено релевантных данных" or similar.
+        No crash, graceful empty result handling.
+        User can ask follow-up question in same session.
+      </expected-outcome>
+    </VF-017>
+
   </CriticalFlows>
 
   <ModuleVerification>
@@ -483,6 +521,67 @@
       </scenarios>
     </V-M-STATIC>
 
+    <!-- ═══ PHASE-6 MODULE VERIFICATION (Chat with Vectors — RAG) ═══ -->
+
+    <V-M-RAG-SEARCH MODULE="M-RAG-SEARCH" PRIORITY="high">
+      <module-checks>
+        <check-1>python -c "from rag import _rag_search; print('rag search OK')"</check-1>
+        <check-2>curl -s http://localhost:6335/collections/Polza_user_logs | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['result']['points_count'] > 100, 'Need at least 100 vectors for RAG'"</check-2>
+        <check-3>curl -s -X POST http://localhost:5001/api/chat/status | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['vectors'] > 0; assert d['model'] == 'nvidia/nemotron-3-nano-30b-a3b:free'"</check-3>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">_rag_search("что делал Радько") returns sources with api_key_name containing "Радько"</scenario-1>
+        <scenario-2 kind="success">Employee name detected → Qdrant filter applied → results filtered by employee</scenario-2>
+        <scenario-3 kind="success">Generic query "какие темы у команды" returns diverse sources from multiple employees</scenario-3>
+        <scenario-4 kind="success">Each enriched source has full summary text (not just 200-char snippet)</scenario-4>
+        <scenario-5 kind="failure">Qdrant unreachable → graceful error, no crash</scenario-5>
+        <scenario-6 kind="failure">Ollama embed down → graceful error, chat shows "service unavailable"</scenario-6>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>[RAG][Search] query="..." found=N sources</marker-1>
+        <marker-2>[RAG][Search] employee filter: ...</marker-1>
+      </required-log-markers>
+    </V-M-RAG-SEARCH>
+
+    <V-M-RAG-CHAT MODULE="M-RAG-CHAT" PRIORITY="high">
+      <module-checks>
+        <check-1>curl -s -X POST http://localhost:5001/api/chat/new | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'session_id' in d; assert len(d['session_id']) > 10"</check-1>
+        <check-2>curl -s -N -X POST http://localhost:5001/api/chat/message -H "Content-Type: application/json" -d '{"session_id":"test","message":"пинг"}' --max-time 30 2>/dev/null | head -5 | grep -q 'data:' && echo 'SSE stream works'</check-2>
+        <check-3>curl -s http://localhost:5001/api/chat/status | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'vectors' in d; assert 'model' in d"</check-3>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">New session created, message sent, SSE stream received with sources + tokens + done events</scenario-1>
+        <scenario-2 kind="success">Follow-up message in same session includes conversation context (LLM remembers previous Q&A)</scenario-2>
+        <scenario-3 kind="success">Streaming tokens arrive progressively (not all at once)</scenario-3>
+        <scenario-4 kind="failure">Invalid session_id → auto-creates new session, responds normally</scenario-4>
+        <scenario-5 kind="failure">OpenRouter 429 → retry with backoff, eventual response or timeout error in stream</scenario-5>
+        <scenario-6 kind="success">Session expires after 2h → new session auto-created</scenario-6>
+      </scenarios>
+      <required-log-markers>
+        <marker-1>[RAG][Chat] streaming response session_id=...</marker-1>
+        <marker-2>[RAG][Chat] done tokens=N</marker-1>
+      </required-log-markers>
+    </V-M-RAG-CHAT>
+
+    <V-M-CHAT-UI MODULE="M-CHAT-UI" PRIORITY="high">
+      <module-checks>
+        <check-1>curl -s http://localhost:5001/chat.js | grep -q 'initChat' && echo 'chat init present'</check-1>
+        <check-2>curl -s http://localhost:5001/chat.css | grep -q 'chat-panel' && echo 'chat panel css present'</check-1>
+        <check-3>curl -s http://localhost:5001/ | grep -q 'chat.js' && echo 'chat.js loaded in index.html'</check-3>
+        <check-4>curl -s http://localhost:5001/ | grep -q 'chat.css' && echo 'chat.css loaded in index.html'</check-4>
+        <check-5>curl -s http://localhost:5001/ | grep -q 'chat-panel-mount' && echo 'panel mount point present'</check-5>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">💬 button appears in topbar on page load</scenario-1>
+        <scenario-2 kind="success">Click button → slide-in panel opens from right (400px)</scenario-2>
+        <scenario-3 kind="success">Type message + Enter → streaming response appears progressively</scenario-3>
+        <scenario-4 kind="success">Source chips visible before AI response, clickable → opens detail modal</scenario-5>
+        <scenario-5 kind="success">🔄 New Chat button clears messages and starts fresh session</scenario-5>
+        <scenario-6 kind="success">Close button hides panel. Reopen shows previous messages (from memory).</scenario-6>
+        <scenario-7 kind="success">Dark/light theme applies to chat panel</scenario-7>
+      </scenarios>
+    </V-M-CHAT-UI>
+
   </ModuleVerification>
 
   <PhaseGates>
@@ -591,6 +690,27 @@
         <evidence-7>No ImportError or ModuleNotFoundError in startup log</evidence-7>
       </required-evidence>
     </Gate-Phase-5>
+
+    <Gate-Phase-6 PHASE="Phase-6" STATUS="planned">
+      <goal>RAG chat works end-to-end: user asks question → semantic search in Qdrant → context enrichment from PostgreSQL → Nemotron Nano generates streaming response with source citations. Slide-in chat panel functional.</goal>
+      <commands>
+        <command-1>curl -s -X POST http://localhost:5001/api/chat/new | python3 -m json.tool</command-1>
+        <command-2>curl -s -N -X POST http://localhost:5001/api/chat/message -H "Content-Type: application/json" -d '{"session_id":"test","message":"Что делал Радько Кирилл на этой неделе?"}' --max-time 60 2>/dev/null | head -20</command-2>
+        <command-3>curl -s http://localhost:5001/api/chat/status | python3 -m json.tool</command-3>
+        <command-4>curl -s http://localhost:5001/chat.js | wc -l</command-4>
+        <command-5>curl -s http://localhost:5001/chat.css | wc -l</command-5>
+      </commands>
+      <required-evidence>
+        <evidence-1>POST /api/chat/new returns session_id (UUID)</evidence-1>
+        <evidence-2>POST /api/chat/message returns SSE stream with "sources" event, multiple "token" events, "done" event</evidence-2>
+        <evidence-3>AI response mentions "Радько" and cites specific generation IDs as sources</evidence-3>
+        <evidence-4>GET /api/chat/status returns {vectors: 6627+, model: "nvidia/nemotron-3-nano-30b-a3b:free"}</evidence-4>
+        <evidence-5>chat.js loads (200+ lines), chat.css loads (100+ lines)</evidence-5>
+        <evidence-6>UI: 💬 button in topbar, click opens slide-in panel, message input works, streaming response renders</evidence-6>
+        <evidence-7>Log shows: [RAG][Search] found=N sources + [RAG][Chat] streaming response + [RAG][Chat] done tokens=N</evidence-7>
+        <evidence-8>No changes to app.js — existing table/charts/analyze-all still work unchanged</evidence-8>
+      </required-evidence>
+    </Gate-Phase-6>
 
   </PhaseGates>
 

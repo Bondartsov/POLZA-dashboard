@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<DevelopmentPlan VERSION="1.0.0">
+<DevelopmentPlan VERSION="1.1.0">
   <!-- CHANGELOG:
+         1.1.0 (2026-04-25): Phase-6 "Chat with Vectors" — RAG-чат поверх Qdrant.
+                             New package: rag/ (search.py, chat.py, prompts.py).
+                             New route: routes/chat.py.
+                             New frontend: static/chat.js + static/chat.css.
+                             New modules: M-RAG-SEARCH, M-RAG-CHAT, M-CHAT-UI.
+                             LLM: NVIDIA Nemotron 3 Nano 30B A3B (free) via OpenRouter streaming.
+                             DataFlow: DF-013 (RAG Chat).
          1.0.0 (2026-04-23): Phase-5 "Modular Refactoring".
                              Monolithic polza_dashboard.py (2168 lines) split into modular packages.
                              New packages: config.py, providers/, embeddings/, workers/, routes/.
@@ -45,6 +52,7 @@
     <risk-4>Anthropic prompt-caching имеет минимум 2048 токенов для Haiku 4.5; текущие system-промпты короче — кеш молча не применяется. Экономия обеспечивается persistent DB-кешем вместо prompt-cache.</risk-4>
     <arch-dual-provider>Phase-4 introduces dual LLM provider: Anthropic (Cloud) via native Messages API vs Ollama (On-Prem) via native /api/chat. Runtime switching via _provider_state. Ollama native API with think:false gives 2-5s response; OpenAI-compatible /v1/chat/completions does NOT support think parameter. /no_think in prompt doesn't work — must use the API parameter.</arch-dual-provider>
     <arch-vector-storage>Phase-4 adds Qdrant vector DB (separate container polza-qdrant on port 6335). Every summarize call now runs LLM + embedding in PARALLEL via ThreadPoolExecutor. Vectors are 768-dim cosine (nomic-embed-text-v2-moe). Payload includes generation_id, topic, session_id, key_name, model, created_at. Enables future semantic search across all analyzed generations.</arch-vector-storage>
+    <arch-rag-chat>Phase-6 adds RAG (Retrieval-Augmented Generation) chat over vectorized data. Pipeline: user query → embed → Qdrant semantic search (top-30) → optional employee name filter (hybrid search) → enrich with generation_summaries from PostgreSQL → build context → Nemotron Nano 30B (OpenRouter free) generates answer with source citations. Streaming SSE response. Slide-in chat panel UI, independent from main SPA. 6627 vectors available (2026-04-25), 6680 of 11027 generations analyzed. Context enrichment from DB summaries (6-8 sentences each) is key — Qdrant payload snippets are only 200 chars.</arch-rag-chat>
   </ArchitectureNotes>
 
   <Modules>
@@ -472,6 +480,115 @@
       </notes>
     </M-PROVIDER-UI>
 
+    <!-- ═══ PHASE-6 MODULES (Chat with Vectors — RAG) ═══ -->
+
+    <M-RAG-SEARCH NAME="RAG Retrieval Engine" TYPE="CORE_LOGIC" LAYER="2" ORDER="8" STATUS="planned">
+      <contract>
+        <purpose>Vector search pipeline: embed query → hybrid search Qdrant (semantic + employee filter) → enrich from PostgreSQL → structured sources for RAG context</purpose>
+        <scope>Query embedding, employee name detection, Qdrant search with filters, DB enrichment, context block formatting</scope>
+        <inputs>Natural language query string</inputs>
+        <outputs>List of enriched sources: [{id, score, summary, topic, employee, model, created_at, risk_flags, is_work}]</outputs>
+        <errors>
+          <error code="QDRANT_EMPTY">Qdrant has no vectors → returns empty sources with suggestion to analyze first</error>
+          <error code="NO_RELEVANT">All scores below RAG_MIN_SCORE threshold → returns empty sources with "не найдено" message</error>
+          <error code="EMBED_FAILED">Ollama embed service down → returns error, chat shows service unavailable</error>
+        </errors>
+      </contract>
+      <interface>
+        <fn-_rag_search PURPOSE="Main entry: query → enriched sources list" />
+        <fn-_embed_query PURPOSE="Embed query via _embed_text (reuse existing)" />
+        <fn-_detect_employee_filter PURPOSE="Match query against 12 known employee names → Qdrant filter" />
+        <fn-_qdrant_hybrid_search PURPOSE="Semantic search + employee filter, merge/dedup, top-20" />
+        <fn-_enrich_sources PURPOSE="Fetch full summaries from generation_summaries for matched IDs" />
+        <fn-_build_context_block PURPOSE="Format sources into text block for RAG prompt" />
+        <export-RAG_SYSTEM_PROMPT PURPOSE="System prompt for RAG chat LLM" />
+      </interface>
+      <depends>M-CONFIG, M-EMBEDDING, M-QDRANT, M-GEN-SUMMARY-STORE</depends>
+      <target>
+        <source>rag/__init__.py, rag/search.py, rag/prompts.py</source>
+      </target>
+      <observability>
+        <log-prefix>[RAG][Search]</log-prefix>
+      </observability>
+      <verification-ref>V-M-RAG-SEARCH</verification-ref>
+      <notes>
+        <note-1>Hybrid search: always semantic (top-30), plus filtered by employee name if detected in query. 12 known employees loaded from api_keys table.</note-1>
+        <note-2>Context enrichment is critical: Qdrant payload has only 200-char snippets, but generation_summaries have full 6-8 sentence summaries. Enrichment from DB provides the real depth.</note-2>
+        <note-3>Minimum score threshold (default 0.3) filters irrelevant results. Configurable via RAG_MIN_SCORE env var.</note-3>
+      </notes>
+    </M-RAG-SEARCH>
+
+    <M-RAG-CHAT NAME="RAG Chat Engine" TYPE="CORE_LOGIC" LAYER="2" ORDER="9" STATUS="planned">
+      <contract>
+        <purpose>Chat session management + streaming LLM generation for RAG responses. In-memory sessions, OpenRouter streaming via SSE.</purpose>
+        <scope>Session CRUD, message history, RAG prompt assembly, OpenRouter streaming call, SSE event generation</scope>
+        <inputs>{session_id, message} from frontend</inputs>
+        <outputs>SSE stream: sources event → token events → done event</outputs>
+        <errors>
+          <error code="SESSION_EXPIRED">Session older than 2 hours → auto-create new session</error>
+          <error code="OPENROUTER_429">Rate limited → retry with exponential backoff (up to 4 retries)</error>
+          <error code="OPENROUTER_ERROR">Non-200 response → return error in SSE stream</error>
+        </errors>
+      </contract>
+      <interface>
+        <fn-_chat_new_session PURPOSE="Create UUID session, init message history" />
+        <fn-_chat_add_message PURPOSE="Append {role, content} to session, trim to max 20" />
+        <fn-_build_rag_messages PURPOSE="Build OpenRouter messages: system + context + history + user" />
+        <fn-_stream_chat_response PURPOSE="Call OpenRouter streaming, yield SSE events" />
+        <fn-_cleanup_expired_sessions PURPOSE="Remove sessions >2h old" />
+        <fn-api_chat_message PURPOSE="POST /api/chat/message → SSE Flask endpoint" />
+        <fn-api_chat_new PURPOSE="POST /api/chat/new → {session_id}" />
+        <fn-api_chat_status PURPOSE="GET /api/chat/status → {vectors, model}" />
+      </interface>
+      <depends>M-CONFIG, M-RAG-SEARCH</depends>
+      <target>
+        <source>rag/chat.py, routes/chat.py</source>
+      </target>
+      <observability>
+        <log-prefix>[RAG][Chat]</log-prefix>
+      </observability>
+      <verification-ref>V-M-RAG-CHAT</verification-ref>
+      <notes>
+        <note-1>Fixed model: nvidia/nemotron-3-nano-30b-a3b:free (256K context, free). Independent from summarize provider toggle.</note-1>
+        <note-2>SSE protocol: sources event (pre-generation), token events (streaming), done event (final stats). Frontend renders progressively.</note-2>
+        <note-3>In-memory sessions only. No DB persistence for privacy. Frontend stores in localStorage for page refresh survival.</note-3>
+        <note-4>OpenRouter streaming: response_format NOT set (text, not JSON). Uses choices[0].delta.content for streaming chunks.</note-4>
+      </notes>
+    </M-RAG-CHAT>
+
+    <M-CHAT-UI NAME="Chat Panel UI" TYPE="UI_COMPONENT" LAYER="1" ORDER="10" STATUS="planned">
+      <contract>
+        <purpose>Self-contained slide-in chat panel for RAG conversations. Zero changes to app.js. Shows streaming AI responses with clickable source citations.</purpose>
+        <scope>Panel HTML generation, topbar button, SSE consumption, markdown rendering, source chips, theme support</scope>
+        <inputs>User text input, SSE events from /api/chat/message</inputs>
+        <outputs>Visual chat panel with streaming messages and source links</outputs>
+      </contract>
+      <interface>
+        <fn-initChat PURPOSE="Self-initialize: add topbar button, create panel, bind events" />
+        <fn-toggleChat PURPOSE="Open/close panel (slide animation)" />
+        <fn-sendMessage PURPOSE="POST /api/chat/message, consume SSE via fetch ReadableStream" />
+        <fn-renderSources PURPOSE="Show source count bar before AI response" />
+        <fn-renderToken PURPOSE="Append streaming token to AI message bubble" />
+        <fn-renderDone PURPOSE="Finalize message, show clickable source links" />
+        <fn-newChat PURPOSE="Clear messages, create new session" />
+        <fn-renderMarkdown PURPOSE="Basic markdown: bold, lists, headers" />
+      </interface>
+      <depends>M-STATIC (topbar mount point)</depends>
+      <target>
+        <source>static/chat.js, static/chat.css</source>
+      </target>
+      <observability>
+        <log-prefix>[ChatUI]</log-prefix>
+      </observability>
+      <verification-ref>V-M-CHAT-UI</verification-ref>
+      <notes>
+        <note-1>Integration with index.html: add 3 lines only — chat.css link, chat.js script, panel div. Zero changes to app.js.</note-1>
+        <note-2>chat.js is self-contained (~300 lines). Does NOT import or modify app.js state. All communication via API calls only.</note-2>
+        <note-3>Source chips are clickable — call window.openDetail(genId) to open existing detail modal for that generation.</note-3>
+        <note-4>Theme: inherits dark/light from existing page CSS variables. No separate theme logic.</note-4>
+      </notes>
+    </M-CHAT-UI>
+
   </Modules>
 
   <DataFlow>
@@ -579,6 +696,21 @@
       <evidence>[Provider] switched to openrouter + [GenSummarize][LLM] ok provider=openrouter</evidence>
     </DF-012>
 
+    <DF-013 NAME="RAG Chat" TRIGGER="User types question in chat panel and presses Enter">
+      <step-1>Frontend sends POST /api/chat/message {session_id, message}</step-1>
+      <step-2>M-RAG-SEARCH: _embed_query(message) → 768-dim vector via Ollama</step-2>
+      <step-3>M-RAG-SEARCH: _detect_employee_filter(message) → match against 12 known employee names</step-3>
+      <step-4>M-RAG-SEARCH: _qdrant_hybrid_search(vector, filter) → semantic top-30 + employee filter, merge/dedup, top-20</step-4>
+      <step-5>M-RAG-SEARCH: _enrich_sources(results) → fetch full summaries from generation_summaries (PostgreSQL)</step-5>
+      <step-6>M-RAG-CHAT: SSE event "sources" → frontend renders "💡 Найдено N источников"</step-6>
+      <step-7>M-RAG-CHAT: _build_rag_messages(session_history, context) → OpenRouter messages array</step-7>
+      <step-8>M-RAG-CHAT: _stream_chat_response(messages) → OpenRouter streaming with Nemotron Nano</step-8>
+      <step-9>For each streaming chunk: SSE event "token" → frontend appends to AI bubble</step-9>
+      <step-10>On completion: SSE event "done" → finalize message, show clickable source chips</step-10>
+      <step-11>Chat history appended to session (in-memory). Frontend stores in localStorage for refresh.</step-11>
+      <evidence>[RAG][Search] query="..." found=N sources + [RAG][Chat] streaming response + SSE events in browser</evidence>
+    </DF-013>
+
   </DataFlow>
 
   <ImplementationOrder>
@@ -636,6 +768,15 @@
       <step-5 module="M-ROUTES" status="done">Extract routes/: misc.py, generations.py, summarize.py, sessions.py, analyze.py, employee.py, provider.py, keys.py, sync.py, proxy.py with register_all(app) in __init__.py</step-5>
       <step-6 module="M-APP" status="done">Reduce polza_dashboard.py to entrypoint: main() only (148 lines)</step-6>
     </Phase-5>
+
+    <Phase-6 name="Chat with Vectors (RAG)" status="planned">
+      <goal>RAG-чат поверх Qdrant векторов: произвольные вопросы админа → семантический поиск → обогащение из PostgreSQL → Nemotron Nano генерирует ответ с цитированием источников. Streaming SSE. Slide-in панель чата.</goal>
+      <step-1 module="M-RAG-SEARCH" status="planned" verification="V-M-RAG-SEARCH">rag/ package: search.py (retrieval pipeline) + prompts.py (RAG system prompt). Hybrid search: semantic + employee filter. Context enrichment from generation_summaries.</step-1>
+      <step-2 module="M-RAG-CHAT" status="planned" verification="V-M-RAG-CHAT">rag/chat.py: session management, prompt assembly, OpenRouter streaming. routes/chat.py: SSE endpoints. Model: nvidia/nemotron-3-nano-30b-a3b:free.</step-2>
+      <step-3 module="M-CHAT-UI" status="planned" verification="V-M-CHAT-UI">static/chat.js + static/chat.css: slide-in panel, streaming messages, source chips, markdown. Self-contained, zero changes to app.js.</step-3>
+      <step-4 module="M-APP" status="planned">Register chat blueprint. Add 3 lines to index.html. New env vars: RAG_CHAT_MODEL, RAG_MAX_SOURCES, RAG_MIN_SCORE.</step-4>
+      <step-5 module="M-ROUTES" status="planned">routes/chat.py Blueprint with POST /api/chat/message, POST /api/chat/new, GET /api/chat/status. Register in routes/__init__.py.</step-5>
+    </Phase-6>
 
   </ImplementationOrder>
 
