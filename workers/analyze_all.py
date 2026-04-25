@@ -94,8 +94,8 @@ def _analyze_single_gen(gen_id: str) -> dict:
                 "user_text_snippet": total_text[:200],
                 "topic": parsed.get("topic", ""),
                 "is_work": parsed.get("is_work", True),
-                "session_id": gen_meta.get("session_id", "") if gen_meta else "",
-                "api_key_name": gen_meta.get("sourceKeyName", "") if gen_meta else "",
+                "session_id": getattr(gen_obj, "session_id", "") or gen_meta.get("sessionId", ""),
+                "api_key_name": gen_meta.get("apiKeyName", "") if gen_meta else "",
                 "model_used": gen_meta.get("modelDisplayName", "") if gen_meta else "",
                 "created_at": gen_meta.get("createdAt", "") if gen_meta else "",
             }

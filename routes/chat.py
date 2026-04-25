@@ -33,9 +33,12 @@ def api_chat_message():
 
     def generate():
         for event in chat_send(session_id, message):
-            yield event
+            if isinstance(event, str):
+                yield event.encode("utf-8")
+            else:
+                yield event
 
-    return Response(generate(), mimetype="text/event-stream; charset=utf-8",
+    return Response(generate(), content_type="text/event-stream; charset=utf-8",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 

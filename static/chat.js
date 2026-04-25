@@ -35,7 +35,6 @@
                     <div class="chat-empty-icon">💬</div>
                     <div class="chat-empty-title">Спрашивайте что угодно о данных команды</div>
                     <div class="chat-empty-hint">
-                        <span onclick="window._chatSuggest('Что делал Радько Кирилл на этой неделе?')">Что делал Радько?</span>
                         <span onclick="window._chatSuggest('Какие темы были у команды за сегодня?')">Темы за сегодня</span>
                         <span onclick="window._chatSuggest('Была ли подозрительная активность?')">Подозрительная активность</span>
                         <span onclick="window._chatSuggest('Кто больше всего потратил на AI?')">Кто больше потратил?</span>
@@ -124,8 +123,8 @@
                     <div class="chat-empty-icon">💬</div>
                     <div class="chat-empty-title">Спрашивайте что угодно о данных команды</div>
                     <div class="chat-empty-hint">
-                        <span onclick="window._chatSuggest('Что делал Радько Кирилл на этой неделе?')">Что делал Радько?</span>
                         <span onclick="window._chatSuggest('Какие темы были у команды за сегодня?')">Темы за сегодня</span>
+                        <span onclick="window._chatSuggest('Была ли подозрительная активность?')">Подозрительная активность</span>
                     </div>
                 </div>`;
         }
