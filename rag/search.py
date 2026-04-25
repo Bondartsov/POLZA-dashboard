@@ -254,9 +254,9 @@ def _build_global_aggregation() -> str:
 
 
 def _build_employee_list_context() -> str:
-    """Build context block listing all real employees with their stats from Qdrant.
+    """Build context block listing all real employees with their stats.
     
-    For each employee: name, total requests, date range, top models.
+    Uses PostgreSQL for fast aggregation: request count, cost, is_work, risk_flags.
     """
     global _employee_names_non_system
     if not _employee_names_non_system:
@@ -271,60 +271,77 @@ def _build_employee_list_context() -> str:
         ""
     ]
     
-    # Try to get per-employee stats from Qdrant
-    client = _get_qdrant_client()
-    employee_stats = {}
-    
-    if client:
+    try:
+        session = get_session()
         try:
-            _qdrant_ensure_collection()
-            for name in sorted(names):
-                try:
-                    from qdrant_client.models import FieldCondition, Filter, MatchValue, CountResult
-                    
-                    emp_filter = Filter(
-                        must=[FieldCondition(key="api_key_name", match=MatchValue(value=name))]
-                    )
-                    count_result = client.count(
-                        collection_name=QDRANT_COLLECTION,
-                        count_filter=emp_filter,
-                    )
-                    total = count_result.count
-                    
-                    # Get date range + last model via scroll (limit 1 for latest)
-                    records, _ = client.scroll(
-                        collection_name=QDRANT_COLLECTION,
-                        scroll_filter=emp_filter,
-                        limit=1,
-                        with_payload=True,
-                        with_vectors=False,
-                    )
-                    
-                    last_date = ""
-                    last_model = ""
-                    if records:
-                        p = records[0].payload
-                        last_date = p.get("created_at", "")[:10]
-                        last_model = p.get("model_display_name", "") or p.get("model_used", "")
-                    
-                    employee_stats[name] = {
-                        "total": total,
-                        "last_date": last_date,
-                        "last_model": last_model,
-                    }
-                except Exception as e:
-                    print(f"[RAG][Search] employee stat error for '{name}': {e}")
-                    employee_stats[name] = {"total": 0, "last_date": "", "last_model": ""}
-        except Exception as e:
-            print(f"[RAG][Search] employee list stats error: {e}")
-    
-    for i, name in enumerate(sorted(names), 1):
-        stats = employee_stats.get(name, {})
-        total = stats.get("total", 0)
-        if total > 0:
-            lines.append(f"{i}. {name} — {total} запросов, последняя активность: {stats.get('last_date', '?')}, модель: {stats.get('last_model', '?')}")
-        else:
-            lines.append(f"{i}. {name} — запросов не найдено")
+            # Per-employee stats from generations table
+            emp_stats = session.query(
+                Generation.api_key_name,
+                sa_func.count(Generation.id).label("total_requests"),
+                sa_func.coalesce(sa_func.sum(Generation.cost), 0).label("total_cost"),
+                sa_func.min(Generation.created_at_api).label("first_request"),
+                sa_func.max(Generation.created_at_api).label("last_request"),
+            ).filter(
+                Generation.api_key_name.in_(names),
+            ).group_by(
+                Generation.api_key_name
+            ).order_by(
+                sa_desc("total_cost")
+            ).all()
+            
+            # Per-employee suspicious activity from generation_summaries
+            from config import GenerationSummary
+            suspicious_map = {}
+            try:
+                suspicious_rows = session.query(
+                    GenerationSummary.is_work,
+                    GenerationSummary.risk_flags,
+                ).filter(
+                    GenerationSummary.is_work == False,  # noqa: E712
+                ).all()
+                # Count non-work per employee — need to join
+                non_work_counts = session.query(
+                    Generation.api_key_name,
+                    sa_func.count(GenerationSummary.generation_id).label("non_work_cnt"),
+                ).join(
+                    GenerationSummary, Generation.id == GenerationSummary.generation_id
+                ).filter(
+                    GenerationSummary.is_work == False,  # noqa: E712
+                    Generation.api_key_name.in_(names),
+                ).group_by(
+                    Generation.api_key_name
+                ).all()
+                suspicious_map = {r.api_key_name: int(r.non_work_cnt) for r in non_work_counts}
+            except Exception as e:
+                print(f"[RAG][Search] suspicious activity query error: {e}")
+            
+            for i, s in enumerate(emp_stats, 1):
+                name = s.api_key_name or "?"
+                cost = float(s.total_cost or 0)
+                req_count = int(s.total_requests or 0)
+                first = s.first_request.strftime("%Y-%m-%d") if s.first_request else "?"
+                last = s.last_request.strftime("%Y-%m-%d") if s.last_request else "?"
+                non_work = suspicious_map.get(name, 0)
+                
+                entry = f"{i}. {name} — {req_count} запросов, стоимость: {cost:.2f} ₽"
+                entry += f", период: {first} — {last}"
+                if non_work > 0:
+                    entry += f", ⚠️ {non_work} подозрительных (is_work=False)"
+                lines.append(entry)
+            
+            # Add employees with zero records
+            found_names = {s.api_key_name for s in emp_stats}
+            missing = [n for n in sorted(names) if n not in found_names]
+            if missing:
+                lines.append("")
+                for name in missing:
+                    lines.append(f"• {name} — запросов не найдено")
+            
+        finally:
+            session.close()
+    except Exception as e:
+        print(f"[RAG][Search] employee list SQL error: {e}")
+        lines.append(f"Ошибка загрузки: {e}")
     
     return "\n".join(lines)
 
