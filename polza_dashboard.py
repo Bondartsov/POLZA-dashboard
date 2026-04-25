@@ -65,6 +65,7 @@ def main():
 
     _provider_state["provider"] = config.LLM_PROVIDER
     _provider_state["openrouter_model"] = config.OPENROUTER_MODEL
+    _provider_state["rag_chat_model"] = config.RAG_CHAT_MODEL
     auto_analyze_env = os.environ.get("AUTO_ANALYZE", "false").lower() in ("true", "1", "yes")
     _provider_state["auto_analyze"] = auto_analyze_env
 

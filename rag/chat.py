@@ -33,7 +33,12 @@ _MAX_RETRIES = 4
 
 
 def _get_chat_model():
-    return getattr(config, "RAG_CHAT_MODEL", _CHAT_MODEL)
+    """Get current RAG chat model from provider_state (runtime switchable)."""
+    try:
+        from config import _provider_state
+        return _provider_state.get("rag_chat_model", getattr(config, "RAG_CHAT_MODEL", _CHAT_MODEL))
+    except ImportError:
+        return getattr(config, "RAG_CHAT_MODEL", _CHAT_MODEL)
 
 
 def _get_max_history():
@@ -154,7 +159,7 @@ def _stream_chat_response(messages: list):
             if r.status_code != 200:
                 error_text = r.text[:300]
                 print(f"[RAG][Chat] OpenRouter HTTP {r.status_code}: {error_text}")
-                yield f"data: {json.dumps({'type': 'error', 'message': f'OpenRouter HTTP {r.status_code}'})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'message': f'OpenRouter HTTP {r.status_code}'}, ensure_ascii=False)}\n\n"
                 return
             break
         except Exception as e:
@@ -162,11 +167,11 @@ def _stream_chat_response(messages: list):
                 time.sleep(2 ** (attempt + 1))
                 continue
             print(f"[RAG][Chat] connection error: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
             return
 
     if r is None:
-        yield f"data: {json.dumps({'type': 'error', 'message': 'No response from OpenRouter'})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'message': 'No response from OpenRouter'}, ensure_ascii=False)}\n\n"
         return
 
     # Stream response chunks
@@ -193,11 +198,11 @@ def _stream_chat_response(messages: list):
                 continue
     except Exception as e:
         print(f"[RAG][Chat] stream error: {e}")
-        yield f"data: {json.dumps({'type': 'error', 'message': f'Stream error: {e}'})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'message': f'Stream error: {e}'}, ensure_ascii=False)}\n\n"
         return
 
     print(f"[RAG][Chat] done tokens≈{total_tokens}")
-    yield f"data: {json.dumps({'type': 'done', 'tokens_used': total_tokens})}\n\n"
+    yield f"data: {json.dumps({'type': 'done', 'tokens_used': total_tokens}, ensure_ascii=False)}\n\n"
 # END_BLOCK_CHAT_STREAM
 
 
@@ -224,7 +229,7 @@ def chat_send(session_id: str, message: str):
 
     if search_result.get("error") and not search_result.get("sources"):
         yield f"data: {json.dumps({'type': 'error', 'message': search_result['error']}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'type': 'done', 'tokens_used': 0})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'tokens_used': 0}, ensure_ascii=False)}\n\n"
         return
 
     # Step 2: Send sources event
@@ -237,7 +242,7 @@ def chat_send(session_id: str, message: str):
             "score": round(src.get("score", 0), 2),
         })
 
-    yield f"data: {json.dumps({'type': 'sources', 'count': search_result['count'], 'data': sources_brief}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'sources', 'count': search_result['count'], 'data': sources_brief, 'mode': search_result.get('mode', 'search')}, ensure_ascii=False)}\n\n"
 
     # Step 3: Add user message to history
     _chat_add_message(session_id, "user", message)

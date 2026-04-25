@@ -58,6 +58,27 @@ def _detect_employee_filter(query: str):
     return None
 
 
+_DOSSIER_KEYWORDS = [
+    "досье", "dossier", "всё", "все", "всего", "полный", "полная", "полностью",
+    "история", "перечисли", "перечислить", "список", "сколько", "обзор",
+    "сводка", "суммарно", "итого", "детальн", "подробн", "анализ",
+    "что делал", "чем занимал", "какие запросы", "все запросы",
+    "статистик", "активност", "расход",
+]
+
+
+def _is_dossier_query(query: str, employee_name: str or None) -> bool:
+    """Detect if the query is a 'dossier mode' request — full employee activity dump.
+
+    Triggered when: employee name detected + query contains aggregation/summary keywords,
+    OR query explicitly asks about all activity of an employee.
+    """
+    if not employee_name:
+        return False
+    query_lower = query.lower()
+    return any(kw in query_lower for kw in _DOSSIER_KEYWORDS)
+
+
 def _qdrant_hybrid_search(query_vector: list, employee_name=None):
     """Dual search: semantic (always) + employee filter (if name detected). Merge + dedup."""
     client = _get_qdrant_client()
@@ -121,6 +142,68 @@ def _qdrant_hybrid_search(query_vector: list, employee_name=None):
     return sorted_results
 
 
+# START_BLOCK_DOSSIER_SCROLL
+def _dossier_scroll(employee_name: str) -> list:
+    """Dossier mode: scroll ALL vectors for a specific employee from Qdrant.
+
+    Uses client.scroll() with filter to retrieve every record for the employee,
+    bypassing the limit of semantic search. Returns list of {payload, score}.
+
+    The score is set to 1.0 (exact filter match) since we're not doing semantic ranking.
+    """
+    client = _get_qdrant_client()
+    if not client:
+        return []
+
+    _qdrant_ensure_collection()
+
+    try:
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        emp_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="api_key_name",
+                    match=MatchValue(value=employee_name),
+                )
+            ]
+        )
+
+        all_records = []
+        offset = None
+        batch_size = 200
+
+        while True:
+            records, next_offset = client.scroll(
+                collection_name=QDRANT_COLLECTION,
+                scroll_filter=emp_filter,
+                limit=batch_size,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+            for r in records:
+                gid = r.payload.get("generation_id", "")
+                if gid:
+                    all_records.append({
+                        "payload": r.payload,
+                        "score": 1.0,  # exact filter match, not semantic
+                    })
+
+            if next_offset is None or not records:
+                break
+            offset = next_offset
+
+        print(f"[RAG][Search][DOSSIER] scrolled {len(all_records)} records for '{employee_name}'")
+        return all_records
+
+    except Exception as e:
+        print(f"[RAG][Search][DOSSIER] scroll error: {e}")
+        return []
+# END_BLOCK_DOSSIER_SCROLL
+
+
 def _enrich_sources(search_results: list) -> list:
     """Fetch full summaries from generation_summaries for matched IDs."""
     if not search_results:
@@ -161,59 +244,76 @@ def _enrich_sources(search_results: list) -> list:
 
 # START_BLOCK_RAG_SEARCH
 def _rag_search(query: str) -> dict:
-    """Main RAG retrieval entry: embed query → hybrid search → enrich → context block.
+    """Main RAG retrieval entry: embed query → detect mode (dossier vs semantic) → search → enrich → context block.
+
+    Dossier mode: if employee name detected AND query has aggregation keywords,
+    scroll ALL vectors for that employee (no limit, no min_score).
+    Normal mode: hybrid semantic + employee filter search with score thresholds.
 
     Returns:
         {
             "sources": [...enriched source dicts...],
             "context_block": str,
             "count": int,
-            "error": str or None
+            "error": str or None,
+            "mode": "dossier" or "search"
         }
     """
     if not query or not query.strip():
-        return {"sources": [], "context_block": "", "count": 0, "error": "Empty query"}
+        return {"sources": [], "context_block": "", "count": 0, "error": "Empty query", "mode": "search"}
 
     query = query.strip()[:500]
 
-    # Step 1: Embed query
+    # Step 1: Embed query (always needed for context)
     try:
         query_vector = _embed_text(query)
     except Exception as e:
         print(f"[RAG][Search] embed failed: {e}")
-        return {"sources": [], "context_block": "", "count": 0, "error": f"Embedding service unavailable: {e}"}
+        return {"sources": [], "context_block": "", "count": 0, "error": f"Embedding service unavailable: {e}", "mode": "search"}
 
     if not query_vector:
-        return {"sources": [], "context_block": "", "count": 0, "error": "Embedding returned empty vector"}
+        return {"sources": [], "context_block": "", "count": 0, "error": "Embedding returned empty vector", "mode": "search"}
 
     # Step 2: Detect employee filter
     employee_name = _detect_employee_filter(query)
 
-    # Step 3: Hybrid search
-    search_results = _qdrant_hybrid_search(query_vector, employee_name)
+    # Step 3: Check if Dossier mode
+    is_dossier = _is_dossier_query(query, employee_name)
+
+    if is_dossier and employee_name:
+        # DOSSIER MODE: scroll all records for this employee
+        print(f"[RAG][Search][DOSSIER] activating dossier mode for '{employee_name}'")
+        search_results = _dossier_scroll(employee_name)
+        mode = "dossier"
+    else:
+        # NORMAL MODE: hybrid search
+        search_results = _qdrant_hybrid_search(query_vector, employee_name)
+        mode = "search"
 
     if not search_results:
-        print(f"[RAG][Search] query='{query[:50]}' found=0 sources")
+        print(f"[RAG][Search] query='{query[:50]}' found=0 sources (mode={mode})")
         return {
             "sources": [],
             "context_block": "ИСТОЧНИКИ: По вашему запросу не найдено релевантных данных.",
             "count": 0,
-            "error": None
+            "error": None,
+            "mode": mode
         }
 
     # Step 4: Enrich from PostgreSQL
     enriched = _enrich_sources(search_results)
 
     # Step 5: Build context block
-    context_block = _build_context_block(enriched)
+    context_block = _build_context_block(enriched, mode)
 
-    print(f"[RAG][Search] query='{query[:50]}' found={len(enriched)} sources"
+    print(f"[RAG][Search] query='{query[:50]}' found={len(enriched)} sources mode={mode}"
           + (f" (filter: {employee_name})" if employee_name else ""))
 
     return {
         "sources": enriched,
         "context_block": context_block,
         "count": len(enriched),
-        "error": None
+        "error": None,
+        "mode": mode
     }
 # END_BLOCK_RAG_SEARCH

@@ -58,6 +58,14 @@
           <option value="google/gemma-4-31b-it:free">Gemma 4 31B</option>
         </select>
       </div>
+      <div id="ragChatModelSelect" style="margin:6px 0 4px 0;">
+        <div style="font-size:10px;color:var(--text3);margin-bottom:2px;">💬 Модель RAG-чата</div>
+        <select id="ragChatModelDropdown" onchange="setRagChatModel(this.value)" style="width:100%;padding:3px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text1);">
+          <option value="nvidia/nemotron-3-nano-30b-a3b:free">Nemotron 3 Nano 30B (fast)</option>
+          <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 Super 120B</option>
+          <option value="google/gemma-4-31b-it:free">Gemma 4 31B</option>
+        </select>
+      </div>
       <label class="auto-analyze-toggle" style="margin-top:4px">
         <input type="checkbox" id="defaultProviderSwitch" onchange="setDefaultProvider()">
         <span>📌 По умолчанию</span>

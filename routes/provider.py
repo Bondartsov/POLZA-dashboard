@@ -4,6 +4,7 @@ from config import (
     _provider_state, _persist_provider_to_env,
     OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL, OLLAMA_THINKING,
     OPENROUTER_MODEL, OPENROUTER_MODELS,
+    RAG_CHAT_MODELS,
     BASE_DIR,
 )
 
@@ -30,6 +31,10 @@ def api_provider_config():
             "model": _provider_state.get("openrouter_model", OPENROUTER_MODEL),
             "models": [{"id": k, "label": v} for k, v in OPENROUTER_MODELS.items()],
             "available": bool(_config.OPENROUTER_API_KEY),
+        },
+        "ragChat": {
+            "model": _provider_state.get("rag_chat_model", _config.RAG_CHAT_MODEL),
+            "models": [{"id": k, "label": v} for k, v in RAG_CHAT_MODELS.items()],
         },
     }
     if provider == "ollama":
@@ -74,5 +79,11 @@ def api_provider_set():
         if model in OPENROUTER_MODELS:
             _provider_state["openrouter_model"] = model
             print(f"[Provider] openrouter model switched to {model}")
+    if "ragChatModel" in data:
+        model = data["ragChatModel"]
+        if model in RAG_CHAT_MODELS:
+            _provider_state["rag_chat_model"] = model
+            _config.RAG_CHAT_MODEL = model
+            print(f"[Provider] RAG chat model switched to {model}")
     _persist_provider_to_env()
-    return jsonify({"ok": True, "provider": _provider_state["provider"], "autoAnalyze": _provider_state["auto_analyze"], "openrouterModel": _provider_state.get("openrouter_model", OPENROUTER_MODEL)})
+    return jsonify({"ok": True, "provider": _provider_state["provider"], "autoAnalyze": _provider_state["auto_analyze"], "openrouterModel": _provider_state.get("openrouter_model", OPENROUTER_MODEL), "ragChatModel": _provider_state.get("rag_chat_model", _config.RAG_CHAT_MODEL)})

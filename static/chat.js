@@ -202,7 +202,7 @@
                     try { evt = JSON.parse(dataStr); } catch { continue; }
 
                     if (evt.type === "sources") {
-                        renderSourcesBar(aiDiv, evt.count, evt.data);
+                        renderSourcesBar(aiDiv, evt.count, evt.data, evt.mode);
                         sourcesShown = true;
                     } else if (evt.type === "token") {
                         appendToken(aiDiv, evt.content);
@@ -245,7 +245,7 @@
         return div;
     }
 
-    function renderSourcesBar(aiDiv, count, sources) {
+    function renderSourcesBar(aiDiv, count, sources, mode) {
         // Remove typing indicator
         const typing = aiDiv.querySelector(".chat-typing");
         if (typing) typing.remove();
@@ -255,7 +255,8 @@
 
         const label = document.createElement("div");
         label.className = "sources-label";
-        label.textContent = "💡 Найдено " + count + " источников";
+        const modeTag = mode === "dossier" ? ' 📋 Досье' : '';
+        label.textContent = "💡 Найдено " + count + " источников" + modeTag;
         bar.appendChild(label);
 
         if (sources && sources.length > 0) {

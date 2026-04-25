@@ -192,6 +192,11 @@ async function loadProviderConfig() {
     // Auto-analyze checkbox
     const aa = document.getElementById('autoAnalyzeSwitch');
     if (aa) aa.checked = cfg.autoAnalyze === true;
+    // RAG Chat model dropdown
+    if (cfg.ragChat) {
+      const ragDd = document.getElementById('ragChatModelDropdown');
+      if (ragDd && cfg.ragChat.model) ragDd.value = cfg.ragChat.model;
+    }
     // Default provider badge — show what's saved in .env
     updateDefaultBadge(cfg);
   } catch(e) { console.warn('provider config load failed:', e); }
@@ -224,6 +229,19 @@ async function setOpenRouterModel(model) {
     if (S.providerConfig && S.providerConfig.openrouter) S.providerConfig.openrouter.model = model;
     if (document.getElementById('defaultProviderSwitch')?.checked) updateDefaultBadge(S.providerConfig);
   } catch(e) { console.warn('openrouter model switch failed:', e); }
+}
+
+async function setRagChatModel(model) {
+  try {
+    const r = await fetch('/api/provider/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ragChatModel: model}),
+    });
+    if (!r.ok) return;
+    if (S.providerConfig && S.providerConfig.ragChat) S.providerConfig.ragChat.model = model;
+    console.log('[RAG Chat] model switched to', model);
+  } catch(e) { console.warn('RAG chat model switch failed:', e); }
 }
 
 async function setDefaultProvider() {

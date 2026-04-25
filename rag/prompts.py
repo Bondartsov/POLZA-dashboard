@@ -36,12 +36,22 @@ RAG_SYSTEM_PROMPT = """Ты — ИИ-аналитик данных Polza.AI Dash
 """
 
 
-def _build_context_block(sources: list) -> str:
-    """Build formatted context block from enriched sources for RAG prompt."""
+def _build_context_block(sources: list, mode: str = "search") -> str:
+    """Build formatted context block from enriched sources for RAG prompt.
+
+    Args:
+        sources: list of enriched source dicts
+        mode: "dossier" for full employee dump, "search" for semantic results
+    """
     if not sources:
         return "ИСТОЧНИКИ: Данные не найдены."
 
-    lines = ["ИСТОЧНИКИ (найдено релевантных записей: {})".format(len(sources)), ""]
+    if mode == "dossier":
+        header = "ИСТОЧНИКИ (РЕЖИМ ДОСЬЕ — полная выгрузка всех записей сотрудника, найдено: {})".format(len(sources))
+    else:
+        header = "ИСТОЧНИКИ (найдено релевантных записей: {})".format(len(sources))
+
+    lines = [header, ""]
 
     for i, src in enumerate(sources, 1):
         gen_id = src.get("generation_id", "unknown")

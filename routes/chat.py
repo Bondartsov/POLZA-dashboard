@@ -35,7 +35,7 @@ def api_chat_message():
         for event in chat_send(session_id, message):
             yield event
 
-    return Response(generate(), mimetype="text/event-stream",
+    return Response(generate(), mimetype="text/event-stream; charset=utf-8",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 

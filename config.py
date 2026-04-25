@@ -59,6 +59,11 @@ QDRANT_COLLECTION = "Polza_user_logs"
 QDRANT_ENABLED = True
 
 RAG_CHAT_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
+RAG_CHAT_MODELS = {
+    "nvidia/nemotron-3-nano-30b-a3b:free": "Nemotron 3 Nano 30B (fast)",
+    "nvidia/nemotron-3-super-120b-a12b:free": "Nemotron 3 Super 120B",
+    "google/gemma-4-31b-it:free": "Gemma 4 31B",
+}
 RAG_MAX_SOURCES = 20
 RAG_MIN_SCORE = 0.15
 RAG_MAX_HISTORY = 20
@@ -66,7 +71,12 @@ RAG_MAX_TOKENS = 2000
 RAG_TEMPERATURE = 0.3
 RAG_SESSION_TTL = 7200
 
-_provider_state = {"provider": "ollama", "auto_analyze": False, "openrouter_model": OPENROUTER_MODEL}
+_provider_state = {
+    "provider": "ollama",
+    "auto_analyze": False,
+    "openrouter_model": OPENROUTER_MODEL,
+    "rag_chat_model": RAG_CHAT_MODEL,
+}
 
 
 def load_env():
@@ -116,7 +126,15 @@ def _persist_provider_to_env():
             text = _re.sub(r"^OPENROUTER_MODEL=.*$", f"OPENROUTER_MODEL={model}", text, flags=re.MULTILINE)
         else:
             text += f"\nOPENROUTER_MODEL={model}\n"
+        rag_chat_model = _provider_state.get("rag_chat_model", RAG_CHAT_MODEL)
+        if "RAG_CHAT_MODEL=" in text:
+            text = _re.sub(r"^RAG_CHAT_MODEL=.*$", f"RAG_CHAT_MODEL={rag_chat_model}", text, flags=re.MULTILINE)
+        else:
+            text += f"\nRAG_CHAT_MODEL={rag_chat_model}\n"
         env_path.write_text(text, encoding="utf-8")
+        # Also update runtime config
+        global RAG_CHAT_MODEL
+        RAG_CHAT_MODEL = rag_chat_model
     except Exception as e:
         print(f"[Provider] persist to .env failed: {e}")
 
