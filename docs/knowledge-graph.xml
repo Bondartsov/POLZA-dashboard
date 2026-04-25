@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 5.0.0 -->
+<!-- VERSION: 5.1.0 -->
 <!-- CHANGELOG:
+       5.1.0 (2026-04-26): Phase-7 "Hardening & Refactoring" — RAG security hardening + modular refactoring (Wave-2).
+                           New modules: M-RAG-RETRIEVER (QueryClassifier, 4-mode dispatcher),
+                           M-RAG-CONTEXT-BUILDER (strategy pattern context formatting),
+                           M-RAG-GUARDRAILS (extracted from chat.py, XML escape, injection detection, PII redaction).
+                           Security fixes: SQL parameterization (ORM), word-boundary regex (keyword stuffing prevention),
+                           precompiled patterns (performance), specific error handling + logging.
+                           Testing: 55 unit + 25 adversarial tests (all PASSED).
        5.0.0 (2026-04-25): Phase-6 "Chat with Vectors" — RAG-чат поверх Qdrant.
                            New modules: M-RAG-SEARCH, M-RAG-CHAT, M-CHAT-UI.
                            New package: rag/ with search.py, chat.py, prompts.py.
@@ -50,7 +57,7 @@
        3.1.0: Session summaries, 95-chunk SocratiCode index.
 -->
 
-<KnowledgeGraph project="polza-dashboard" version="5.0.0">
+<KnowledgeGraph project="polza-dashboard" version="5.1.0">
 
   <M-APP NAME="Flask App Entrypoint" TYPE="ENTRY_POINT">
     <purpose>Minimal entrypoint: creates Flask app from config, registers all route blueprints, starts background workers, runs server. Only contains main() function.</purpose>
@@ -506,9 +513,60 @@
       <integration-no-appjs PURPOSE="Zero changes to app.js. Chat self-initializes via DOMContentLoaded and mounts to existing topbar." />
       <constraint-chatjs_scope PURPOSE="chat.js is self-contained (~300 lines). Does NOT import or modify app.js state. Communicates only via API calls." />
     </annotations>
-  </M-CHAT-UI>
+   </M-CHAT-UI>
 
-  <Constraints>
+  <!-- ═══ PHASE-7 WAVE-2 MODULES (Security Hardening + Modular Refactoring) ═══ -->
+
+  <M-RAG-RETRIEVER NAME="RAG Query Classifier" TYPE="CORE_LOGIC">
+    <purpose>Classify user queries into 4 retrieval modes (SEARCH, DOSSIER, EMPLOYEE_LIST, GLOBAL_AGG) using keyword-based heuristics with word boundaries. Enable mode-specific context building and retrieval strategies.</purpose>
+    <path>rag/retriever.py</path>
+    <depends>rag.search (for _detect_employee_filter, _rag_search integration), config (RAG_MAX_SOURCES)</depends>
+    <annotations>
+      <class-QueryMode PURPOSE="Enum: SEARCH, DOSSIER, EMPLOYEE_LIST, GLOBAL_AGG" />
+      <class-QueryClassifier PURPOSE="Singleton classifier with precompiled word-boundary patterns (performance optimization, keyword-stuffing prevention)" />
+      <fn-classify PURPOSE="Classify query → QueryMode using word-boundary regex matching" />
+      <fn-retrieve PURPOSE="Classify + dispatch to appropriate retrieval (SEARCH/DOSSIER use _rag_search, others return empty sources for context builder)" />
+      <feature-word_boundaries PURPOSE="WAVE-2 FIX: Keyword matching via \bkeyword\b prevents substring matching (e.g., 'listless' won't match 'list')" />
+      <feature-caching PURPOSE="Keywords + patterns cached at module level (precompiled) — no per-request recreation" />
+      <limitation-keyword_priority PURPOSE="Simple priority order (DOSSIER > EMPLOYEE_LIST > GLOBAL_AGG). Advanced heuristics (scoring) left for future." />
+    </annotations>
+  </M-RAG-RETRIEVER>
+
+  <M-RAG-CONTEXT-BUILDER NAME="RAG Context Builder" TYPE="CORE_LOGIC">
+    <purpose>Convert retrieved sources and metadata into mode-specific formatted context blocks for LLM prompt. Strategy pattern: different formatting per QueryMode (semantic search, dossier, employee list, global aggregation).</purpose>
+    <path>rag/context_builder.py</path>
+    <depends>rag.retriever (QueryMode enum), db (GenerationSummary, Session for ORM queries)</depends>
+    <annotations>
+      <class-ContextBuilder PURPOSE="Mode-specific context builder with strategy pattern (build method dispatches to _build_*_context)" />
+      <method-build PURPOSE="Route to mode-specific context formatting" />
+      <method-build_search_context PURPOSE="Format semantic search results (top 10 sources with snippet + relevance score)" />
+      <method-build_dossier_context PURPOSE="Format employee dossier (record count, stats from first source, recent entries)" />
+      <method-build_employee_list_context PURPOSE="Query ORM for employee list with aggregated stats (count, work_ratio)" />
+      <method-build_global_agg_context PURPOSE="Query ORM for global metrics (total generations, unique employees, costs, tokens)" />
+      <feature-parametrized_queries PURPOSE="WAVE-2 FIX: Use SQLAlchemy ORM queries (func.count, func.avg, select statements) — NOT text() SQL. Prevents SQL injection." />
+      <error-handling PURPOSE="Specific exceptions (ValueError, TypeError) logged with context. Graceful fallback messages ('Данные недоступны')" />
+      <limitation-simple_attributes PURPOSE="Uses getattr() for safe attribute access. May silently skip missing attributes (e.g., snippet, topic on source objects)." />
+    </annotations>
+  </M-RAG-CONTEXT-BUILDER>
+
+  <M-RAG-GUARDRAILS NAME="RAG Security Guardrails" TYPE="INTEGRATION">
+    <purpose>Provide security guardrails for RAG chat: prompt injection detection, XML escaping to prevent injection via context, PII redaction (phone, email, basic name masking).</purpose>
+    <path>rag/guardrails.py</path>
+    <depends>None (pure utility module, no external dependencies except stdlib re)</depends>
+    <annotations>
+      <fn-escape_xml PURPOSE="Escape XML special chars (& < > ' \") to XML entities. Prevents user content from breaking out of XML tags in prompt." />
+      <fn-detect_injection_attempt PURPOSE="Detect common prompt injection keywords (Russian + English) using word-boundary regex. Returns bool." />
+      <fn-redact_pii PURPOSE="Redact PII patterns: Russian phone (+7, 8 formats), email, basic Russian names (regex). Returns text with [REDACTED:type] markers." />
+      <fn-validate_and_sanitize PURPOSE="Combined validation: escape XML + detect injection + optional PII redaction. Returns (cleaned_text, warning_message)." />
+      <feature-precompiled_patterns PURPOSE="WAVE-2 FIX: All regex patterns precompiled at module level (_PHONE_PATTERN_RU1, _EMAIL_PATTERN, _INJECTION_PATTERNS). Prevents per-call recompilation." />
+      <feature-word_boundaries PURPOSE="WAVE-2 FIX: Injection keywords matched with word boundaries (\bkeyword\b) — prevents obfuscation via spacing/capitalization." />
+      <limitation-keyword_heuristic PURPOSE="Keyword-based detection can bypass advanced obfuscation (synonyms, Unicode variants, transliteration). First-pass heuristic only." />
+      <limitation-pii_names PURPOSE="Russian name redaction disabled (too many false positives). TODO: Integrate natasha (NER) for production." />
+      <documented-limitation PURPOSE="Known bypasses: synonym injections ('disregard' vs 'ignore'), Unicode lookalikes (𝐟𝐨𝐫𝐠𝐞𝐭), Cyrillic mix. Recommend multi-stage detection (semantic + LLM)." />
+    </annotations>
+  </M-RAG-GUARDRAILS>
+
+   <Constraints>
     <constraint-sort>Polza.AI API supports only sortBy=createdAt|clientCost; DB supports all columns</constraint-sort>
     <constraint-cache>cached_tokens in prompt_tokens_details = cache READ (hit); prompt_tokens - cached = cache WRITE (miss)</constraint-cache>
     <constraint-sync>Sync every 5 min; incremental (only new records since last_sync_at - 2min buffer)</constraint-sync>

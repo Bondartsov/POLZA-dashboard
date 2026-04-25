@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<DevelopmentPlan VERSION="1.1.0">
+<DevelopmentPlan VERSION="1.2.0">
   <!-- CHANGELOG:
+         1.2.0 (2026-04-26): Phase-7 "Hardening & Refactoring" — Security + modularity.
+                             Wave-2: M-RAG-RETRIEVER (QueryMode, QueryClassifier with word-boundaries),
+                             M-RAG-CONTEXT-BUILDER (strategy pattern, ORM parameterized queries),
+                             M-RAG-GUARDRAILS (extracted from chat, precompiled patterns).
+                             Fixes: SQL injection (ORM), keyword stuffing (word-boundary regex),
+                             keyword caching (no per-request recreation), PII redaction optimization,
+                             specific error handling + logging. Tests: 55 unit + 25 adversarial (PASSED).
          1.1.0 (2026-04-25): Phase-6 "Chat with Vectors" — RAG-чат поверх Qdrant.
                              New package: rag/ (search.py, chat.py, prompts.py).
                              New route: routes/chat.py.
@@ -769,16 +776,32 @@
       <step-6 module="M-APP" status="done">Reduce polza_dashboard.py to entrypoint: main() only (148 lines)</step-6>
     </Phase-5>
 
-    <Phase-6 name="Chat with Vectors (RAG)" status="planned">
-      <goal>RAG-чат поверх Qdrant векторов: произвольные вопросы админа → семантический поиск → обогащение из PostgreSQL → Nemotron Nano генерирует ответ с цитированием источников. Streaming SSE. Slide-in панель чата.</goal>
-      <step-1 module="M-RAG-SEARCH" status="planned" verification="V-M-RAG-SEARCH">rag/ package: search.py (retrieval pipeline) + prompts.py (RAG system prompt). Hybrid search: semantic + employee filter. Context enrichment from generation_summaries.</step-1>
-      <step-2 module="M-RAG-CHAT" status="planned" verification="V-M-RAG-CHAT">rag/chat.py: session management, prompt assembly, OpenRouter streaming. routes/chat.py: SSE endpoints. Model: nvidia/nemotron-3-nano-30b-a3b:free.</step-2>
-      <step-3 module="M-CHAT-UI" status="planned" verification="V-M-CHAT-UI">static/chat.js + static/chat.css: slide-in panel, streaming messages, source chips, markdown. Self-contained, zero changes to app.js.</step-3>
-      <step-4 module="M-APP" status="planned">Register chat blueprint. Add 3 lines to index.html. New env vars: RAG_CHAT_MODEL, RAG_MAX_SOURCES, RAG_MIN_SCORE.</step-4>
-      <step-5 module="M-ROUTES" status="planned">routes/chat.py Blueprint with POST /api/chat/message, POST /api/chat/new, GET /api/chat/status. Register in routes/__init__.py.</step-5>
-    </Phase-6>
+     <Phase-6 name="Chat with Vectors (RAG)" status="done">
+       <goal>RAG-чат поверх Qdrant векторов: произвольные вопросы админа → семантический поиск → обогащение из PostgreSQL → Nemotron Nano генерирует ответ с цитированием источников. Streaming SSE. Slide-in панель чата.</goal>
+       <step-1 module="M-RAG-SEARCH" status="done" verification="V-M-RAG-SEARCH">rag/ package: search.py (retrieval pipeline) + prompts.py (RAG system prompt). Hybrid search: semantic + employee filter. Context enrichment from generation_summaries.</step-1>
+       <step-2 module="M-RAG-CHAT" status="done" verification="V-M-RAG-CHAT">rag/chat.py: session management, prompt assembly, OpenRouter streaming. routes/chat.py: SSE endpoints. Model: nvidia/nemotron-3-nano-30b-a3b:free.</step-2>
+       <step-3 module="M-CHAT-UI" status="done" verification="V-M-CHAT-UI">static/chat.js + static/chat.css: slide-in panel, streaming messages, source chips, markdown. Self-contained, zero changes to app.js.</step-3>
+       <step-4 module="M-APP" status="done">Register chat blueprint. Add 3 lines to index.html. New env vars: RAG_CHAT_MODEL, RAG_MAX_SOURCES, RAG_MIN_SCORE.</step-4>
+       <step-5 module="M-ROUTES" status="done">routes/chat.py Blueprint with POST /api/chat/message, POST /api/chat/new, GET /api/chat/status. Register in routes/__init__.py.</step-5>
+     </Phase-6>
 
-  </ImplementationOrder>
+     <Phase-7 name="Hardening &amp; Refactoring (RAG Security + Modular)" status="done">
+       <goal>Phase-7 Wave-2: Decompose rag/search.py (798 lines) into SOLID modules, fix 14 critical/high issues (SQL injection, keyword stuffing, weak PII redaction, error handling), add 80+ tests (unit + adversarial). Production-ready RAG with security guardrails.</goal>
+       <notes>
+         <note-1>Wave-1 (DONE): Disable auto-dossier fallback, raise RAG_MIN_SCORE 0.15→0.4, add XML escape + injection guards</note-1>
+         <note-2>Wave-2 (DONE): M-RAG-RETRIEVER (4-mode classifier), M-RAG-CONTEXT-BUILDER (strategy pattern), M-RAG-GUARDRAILS (extraction + optimization)</note-2>
+         <note-3>Security fixes: SQL parameterization (ORM queries), word-boundary regex patterns (keyword stuffing prevention), precompiled patterns (performance), specific error handling with logging</note-3>
+         <note-4>Testing: 55 unit tests + 25 adversarial tests (prompt injection variants, edge cases, combined attacks, regression coverage) — all PASSED</note-4>
+       </notes>
+       <step-1 module="M-RAG-RETRIEVER" status="done" verification="V-M-RAG-RETRIEVER">New rag/retriever.py: QueryMode enum (4 modes), QueryClassifier with word-boundary patterns (caching, no keyword stuffing), retrieve() dispatcher. Integrated into rag package.</step-1>
+       <step-2 module="M-RAG-CONTEXT-BUILDER" status="done" verification="V-M-RAG-CONTEXT-BUILDER">New rag/context_builder.py: ContextBuilder class (strategy pattern), mode-specific context formatting (SEARCH, DOSSIER, EMPLOYEE_LIST, GLOBAL_AGG). Parameterized ORM queries (SQL injection fix).</step-2>
+       <step-3 module="M-RAG-GUARDRAILS" status="done" verification="V-M-RAG-GUARDRAILS">New rag/guardrails.py: Extracted from rag/chat.py (_escape_xml, _detect_injection_attempt, _redact_pii). Precompiled regex patterns (performance). Word-boundary matching prevents obfuscation. Updated rag/chat.py to import from guardrails module.</step-3>
+       <step-4 module="M-EMPLOYEES-RESOLVER" status="done" verification="V-M-EMPLOYEE-RESOLVER">M-EMPLOYEE-RESOLVER (from Wave-1): rag/employee_resolver.py — fuzzy name matching for Issues #1, #9. Handles Russian names, typos, collisions (236 lines, 50+ test coverage)</step-4>
+       <step-5 module="M-RAG-CHAT" status="updated" verification="V-M-RAG-CHAT">Updated rag/chat.py: removed inline guardrails, import from rag.guardrails. Added logging for injection attempts. Maintained all streaming/SSE functionality.</step-5>
+       <step-6 status="done">Testing: 55 unit tests (QueryClassifier 16, Guardrails 19, ContextBuilder 10, Integration 10) + 25 adversarial tests (injection variants, keyword stuffing, edge cases, performance). All PASSED. Limitations documented (synonym bypasses, Unicode obfuscation, NER TODO).</step-6>
+     </Phase-7>
+
+   </ImplementationOrder>
 
   <ExecutionPolicy>
     <default-profile>balanced</default-profile>
