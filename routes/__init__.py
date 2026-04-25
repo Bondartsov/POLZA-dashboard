@@ -10,6 +10,7 @@ from routes.provider import provider_bp
 from routes.keys import keys_bp
 from routes.sync import sync_bp
 from routes.proxy import proxy_bp
+from routes.chat import chat_bp
 
 
 def register_all(app: Flask):
@@ -23,3 +24,4 @@ def register_all(app: Flask):
     app.register_blueprint(keys_bp)
     app.register_blueprint(sync_bp)
     app.register_blueprint(proxy_bp)
+    app.register_blueprint(chat_bp)

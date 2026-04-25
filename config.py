@@ -58,6 +58,14 @@ QDRANT_URL = "http://localhost:6335"
 QDRANT_COLLECTION = "Polza_user_logs"
 QDRANT_ENABLED = True
 
+RAG_CHAT_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
+RAG_MAX_SOURCES = 20
+RAG_MIN_SCORE = 0.3
+RAG_MAX_HISTORY = 20
+RAG_MAX_TOKENS = 2000
+RAG_TEMPERATURE = 0.3
+RAG_SESSION_TTL = 7200
+
 _provider_state = {"provider": "ollama", "auto_analyze": False, "openrouter_model": OPENROUTER_MODEL}
 
 

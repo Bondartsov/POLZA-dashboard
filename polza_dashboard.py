@@ -55,6 +55,14 @@ def main():
     config.QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", config.QDRANT_COLLECTION)
     config.QDRANT_ENABLED = os.environ.get("QDRANT_ENABLED", "true").lower() in ("true", "1", "yes")
 
+    config.RAG_CHAT_MODEL = os.environ.get("RAG_CHAT_MODEL", config.RAG_CHAT_MODEL)
+    config.RAG_MAX_SOURCES = int(os.environ.get("RAG_MAX_SOURCES", config.RAG_MAX_SOURCES))
+    config.RAG_MIN_SCORE = float(os.environ.get("RAG_MIN_SCORE", config.RAG_MIN_SCORE))
+    config.RAG_MAX_HISTORY = int(os.environ.get("RAG_MAX_HISTORY", config.RAG_MAX_HISTORY))
+    config.RAG_MAX_TOKENS = int(os.environ.get("RAG_MAX_TOKENS", config.RAG_MAX_TOKENS))
+    config.RAG_TEMPERATURE = float(os.environ.get("RAG_TEMPERATURE", config.RAG_TEMPERATURE))
+    config.RAG_SESSION_TTL = int(os.environ.get("RAG_SESSION_TTL", config.RAG_SESSION_TTL))
+
     _provider_state["provider"] = config.LLM_PROVIDER
     _provider_state["openrouter_model"] = config.OPENROUTER_MODEL
     auto_analyze_env = os.environ.get("AUTO_ANALYZE", "false").lower() in ("true", "1", "yes")
