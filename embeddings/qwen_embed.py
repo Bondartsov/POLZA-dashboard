@@ -57,7 +57,8 @@ def _embed_text_qwen(
         payload = {
             "model": model,
             "input": text.strip(),
-            "encoding_format": "float"
+            "encoding_format": "float",
+            "dimensions": 768  # Matryoshka truncation — match Qdrant collection size
         }
         
         response = requests.post(url, json=payload, headers=headers, timeout=timeout)
