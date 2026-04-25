@@ -101,6 +101,8 @@ def _analyze_single_gen(gen_id: str) -> dict:
                 "api_key_name": gen_meta.get("apiKeyName", "") if gen_meta else "",
                 "model_used": gen_meta.get("modelDisplayName", "") if gen_meta else "",
                 "created_at": gen_meta.get("createdAt", "") if gen_meta else "",
+                "cost": float(gen_meta.get("cost", 0) or 0) if gen_meta else 0,
+                "total_tokens": int(gen_meta.get("usage", {}).get("total_tokens", 0) or 0) if gen_meta else 0,
             }
             _qdrant_upsert(gen_id, embed_result[0], qdrant_payload)
 

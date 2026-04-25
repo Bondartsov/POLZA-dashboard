@@ -254,7 +254,7 @@
 
         const label = document.createElement("div");
         label.className = "sources-label sources-toggle";
-        const modeTag = mode === "dossier" ? ' 📋 Досье' : mode === "employee_list" ? ' 👥 Сотрудники' : '';
+        const modeTag = mode === "dossier" ? ' 📋 Досье' : mode === "employee_list" ? ' 👥 Сотрудники' : mode === "global_agg" ? ' 📊 Аналитика' : '';
         const arrow = "▶";
         label.textContent = arrow + " 💡 Найдено " + count + " источников" + modeTag;
         bar.appendChild(label);

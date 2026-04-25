@@ -11,8 +11,9 @@ import json
 import config
 from embeddings.embed import _embed_text
 from embeddings.qdrant import _get_qdrant_client, _qdrant_ensure_collection, QDRANT_COLLECTION
-from config import gen_summary_get_many, get_session, ApiKey
+from config import gen_summary_get_many, get_session, ApiKey, Generation
 from rag.prompts import _build_context_block
+from sqlalchemy import func as sa_func, desc as sa_desc
 
 # Employee names cache — loaded once from DB
 _employee_names = None
@@ -74,11 +75,182 @@ _EMPLOYEE_LIST_KEYWORDS = [
     "сколько сотрудников", "какие сотрудники",
 ]
 
+_GLOBAL_AGG_KEYWORDS = [
+    "кто больше всего потратил", "кто потратил", "кто больше потратил",
+    "больше всего потратил", "кто затратил", "кто израсходовал",
+    "расход", "расходы", "затраты", "стоимость", "стоил",
+    "потратил на ai", "потратили на", "кто сколько потратил",
+    "кто использует самые", "общий расход", "общая стоимость",
+    "статистик", "суммарн", "итого", "всего потрачено",
+    "топ по расход", "рейтинг по расход", "кто самый активн",
+    "кто чаще всего", "кто больше всего делает",
+    "самые дорогие", "самые популярные модели",
+    "кто использует gpt", "кто использует claude",
+    "какие модели最受欢迎", "топ моделей",
+    "сводка по команде", "обзор по команде", "аналитика по команде",
+    "сколько запросов было", "сколько всего запросов",
+    "статистика по всем", "по всем сотрудникам",
+]
+
+
+def _is_global_agg_query(query: str) -> bool:
+    """Detect if the query requires global aggregation across ALL employees.
+    
+    These are questions about overall team stats, costs, rankings, etc.
+    that cannot be answered by semantic search alone.
+    """
+    query_lower = query.lower()
+    return any(kw in query_lower for kw in _GLOBAL_AGG_KEYWORDS)
+
 
 def _is_employee_list_query(query: str) -> bool:
     """Detect if user asks for a list of all employees (not about a specific person)."""
     query_lower = query.lower()
     return any(kw in query_lower for kw in _EMPLOYEE_LIST_KEYWORDS)
+
+
+def _build_global_aggregation() -> str:
+    """Build comprehensive team-wide analytics context from PostgreSQL.
+    
+    Aggregates: per-employee costs, request counts, model usage, date ranges.
+    This uses SQL queries directly against the generations table for accuracy.
+    """
+    global _employee_names_non_system
+    if not _employee_names_non_system:
+        _get_employee_names()
+    
+    names = _employee_names_non_system or []
+    
+    lines = [
+        "=== ГЛОБАЛЬНАЯ АНАЛИТИКА ПО ВСЕЙ КОМАНДЕ ===",
+        ""
+    ]
+    
+    try:
+        session = get_session()
+        try:
+            # 1) Per-employee aggregation: cost, count, tokens
+            emp_stats = session.query(
+                Generation.api_key_name,
+                sa_func.count(Generation.id).label("total_requests"),
+                sa_func.coalesce(sa_func.sum(Generation.cost), 0).label("total_cost"),
+                sa_func.coalesce(sa_func.sum(Generation.total_tokens), 0).label("total_tokens"),
+                sa_func.coalesce(sa_func.sum(Generation.prompt_tokens), 0).label("prompt_tokens"),
+                sa_func.coalesce(sa_func.sum(Generation.completion_tokens), 0).label("completion_tokens"),
+                sa_func.min(Generation.created_at_api).label("first_request"),
+                sa_func.max(Generation.created_at_api).label("last_request"),
+            ).filter(
+                Generation.api_key_name.isnot(None),
+                Generation.api_key_name != "",
+            ).group_by(
+                Generation.api_key_name
+            ).order_by(
+                sa_desc("total_cost")
+            ).all()
+            
+            total_team_cost = sum(float(s.total_cost or 0) for s in emp_stats)
+            total_team_requests = sum(int(s.total_requests or 0) for s in emp_stats)
+            total_team_tokens = sum(int(s.total_tokens or 0) for s in emp_stats)
+            
+            lines.append(f"Всего записей в БД: {total_team_requests} запросов")
+            lines.append(f"Общие расходы команды: ${total_team_cost:.4f}")
+            lines.append(f"Общее количество токенов: {total_team_tokens:,}")
+            lines.append("")
+            
+            # Filter to real employees only
+            lines.append(f"РАСХОДЫ ПО СОТРУДНИКАМ ({len([s for s in emp_stats if s.api_key_name in names])} человек из команды):")
+            lines.append("")
+            
+            for i, s in enumerate(emp_stats, 1):
+                name = s.api_key_name or "Неизвестный"
+                cost = float(s.total_cost or 0)
+                req_count = int(s.total_requests or 0)
+                tokens = int(s.total_tokens or 0)
+                first = s.first_request.strftime("%Y-%m-%d") if s.first_request else "?"
+                last = s.last_request.strftime("%Y-%m-%d") if s.last_request else "?"
+                
+                marker = "" if name in names else " [системный]"
+                pct = (cost / total_team_cost * 100) if total_team_cost > 0 else 0
+                
+                lines.append(f"  {i}. {name}{marker}")
+                lines.append(f"     Запросов: {req_count} | Стоимость: ${cost:.4f} ({pct:.1f}%) | Токенов: {tokens:,}")
+                lines.append(f"     Период: {first} — {last}")
+                lines.append("")
+            
+            # 2) Top models by usage
+            model_stats = session.query(
+                Generation.model_display_name,
+                sa_func.count(Generation.id).label("total_requests"),
+                sa_func.coalesce(sa_func.sum(Generation.cost), 0).label("total_cost"),
+            ).filter(
+                Generation.model_display_name.isnot(None),
+            ).group_by(
+                Generation.model_display_name
+            ).order_by(
+                sa_desc("total_cost")
+            ).limit(15).all()
+            
+            if model_stats:
+                lines.append("ТОП-15 МОДЕЛЕЙ ПО СТОИМОСТИ:")
+                lines.append("")
+                for i, m in enumerate(model_stats, 1):
+                    model_name = m.model_display_name or "Unknown"
+                    m_cost = float(m.total_cost or 0)
+                    m_count = int(m.total_requests or 0)
+                    pct = (m_cost / total_team_cost * 100) if total_team_cost > 0 else 0
+                    lines.append(f"  {i}. {model_name} — {m_count} запросов, ${m_cost:.4f} ({pct:.1f}%)")
+                lines.append("")
+            
+            # 3) Daily activity (last 14 days)
+            from datetime import datetime, timezone, timedelta
+            two_weeks_ago = datetime.now(timezone.utc) - timedelta(days=14)
+            daily_stats = session.query(
+                sa_func.date(Generation.created_at_api).label("day"),
+                sa_func.count(Generation.id).label("cnt"),
+                sa_func.coalesce(sa_func.sum(Generation.cost), 0).label("day_cost"),
+            ).filter(
+                Generation.created_at_api >= two_weeks_ago,
+            ).group_by(
+                sa_func.date(Generation.created_at_api)
+            ).order_by(
+                sa_func.date(Generation.created_at_api).desc()
+            ).all()
+            
+            if daily_stats:
+                lines.append("АКТИВНОСТЬ ПО ДНЯМ (последние 14 дней):")
+                lines.append("")
+                for d in daily_stats:
+                    day_str = str(d.day) if d.day else "?"
+                    day_cost = float(d.day_cost or 0)
+                    day_cnt = int(d.cnt or 0)
+                    lines.append(f"  {day_str}: {day_cnt} запросов, ${day_cost:.4f}")
+                lines.append("")
+            
+            # 4) Non-work / suspicious activity
+            try:
+                from config import GenerationSummary
+                suspicious = session.query(
+                    GenerationSummary.is_work,
+                    sa_func.count(GenerationSummary.generation_id).label("cnt"),
+                ).filter(
+                    GenerationSummary.is_work == False,  # noqa: E712
+                ).group_by(
+                    GenerationSummary.is_work
+                ).first()
+                
+                non_work_count = int(suspicious.cnt) if suspicious else 0
+                if non_work_count > 0:
+                    lines.append(f"⚠️ ПОДОЗРИТЕЛЬНАЯ АКТИВНОСТЬ: {non_work_count} запросов с is_work=False (подозрение на личное использование)")
+            except Exception:
+                pass
+            
+        finally:
+            session.close()
+    except Exception as e:
+        print(f"[RAG][Search] global aggregation error: {e}")
+        lines.append(f"ОШИБКА агрегации: {e}")
+    
+    return "\n".join(lines)
 
 
 def _build_employee_list_context() -> str:
@@ -484,7 +656,23 @@ def _rag_search(query: str) -> dict:
             "mode": "employee_list"
         }
 
-    # Step 3: Detect employee filter
+    # Step 3: Check if this is a global aggregation query (costs, stats across team)
+    if _is_global_agg_query(query):
+        print(f"[RAG][Search] global aggregation query detected")
+        context_block = _build_global_aggregation()
+        # Also run semantic search for supporting details
+        search_results = _qdrant_hybrid_search(query_vector, None)
+        enriched = _enrich_sources(search_results) if search_results else []
+        
+        return {
+            "sources": enriched,
+            "context_block": context_block,
+            "count": len(enriched),
+            "error": None,
+            "mode": "global_agg"
+        }
+
+    # Step 4: Detect employee filter
     employee_name = _detect_employee_filter(query)
 
     # Step 4: Check if Dossier mode
