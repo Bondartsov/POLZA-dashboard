@@ -120,6 +120,88 @@ def _build_rag_messages(session_history: list, context_block: str, user_message:
 # END_BLOCK_CHAT_PROMPT
 
 
+_FOLLOWUP_INDICATORS = [
+    "покажи", "покажи эти", "покажи мне", "покажи все", "покажи его", "покажи её",
+    "подробнее", "детальнее", "расскажи ещё", "расскажи больше",
+    "эти запросы", "эти записи", "эти данные", "этих сотрудников",
+    "что именно", "какие именно", "сколько именно",
+    "раскрой", "раскройте", "детали", "конкретно",
+    "приведи примеры", "дай примеры", "перечисли",
+    "подробней", "подробнее про", "расскажи про",
+]
+
+
+def _is_followup_query(message: str) -> bool:
+    """Detect if message is a short follow-up referencing previous context."""
+    msg_lower = message.lower().strip()
+    if len(msg_lower) > 100:
+        return False
+    return any(ind in msg_lower for ind in _FOLLOWUP_INDICATORS) or len(msg_lower) < 30
+
+
+def _expand_followup_query(message: str, session_history: list) -> str:
+    """Expand a follow-up query with context from previous messages.
+    
+    If the user asks a vague follow-up like "покажи эти запросы",
+    extract key entities (employee names, topics, keywords) from the
+    last assistant message and combine into a richer search query.
+    """
+    if not session_history:
+        return message
+    
+    # Find the last assistant message
+    last_assistant = ""
+    last_user = ""
+    for msg in reversed(session_history):
+        if msg["role"] == "assistant" and not last_assistant:
+            last_assistant = msg["content"]
+        elif msg["role"] == "user" and not last_user:
+            last_user = msg["content"]
+        if last_assistant and last_user:
+            break
+    
+    if not last_assistant and not last_user:
+        return message
+    
+    # Extract employee names from previous context
+    from rag.search import _get_employee_names, _detect_employee_filter
+    
+    source_text = last_user + " " + last_assistant[:500]
+    
+    # Find employee names mentioned in previous exchange
+    all_names = _get_employee_names()
+    mentioned_names = []
+    source_lower = source_text.lower()
+    for name in sorted(all_names, key=len, reverse=True):
+        for part in name.split():
+            if len(part) >= 3 and part.lower() in source_lower:
+                mentioned_names.append(name)
+                break
+    
+    # Extract key topics/keywords from the previous user message
+    key_terms = []
+    important_words = [
+        "подозрительн", "is_work", "не рабочий", "не рабочие", "личн",
+        "risk_flags", "аналитик", "расход", "стоимост", "потратил",
+        "токенов", "модел", "gpt", "claude", "gemini",
+    ]
+    last_user_lower = last_user.lower()
+    for word in important_words:
+        if word in last_user_lower:
+            key_terms.append(word)
+    
+    # Build expanded query
+    parts = [message]
+    if mentioned_names:
+        parts.append("сотрудники: " + ", ".join(mentioned_names[:5]))
+    if key_terms:
+        parts.append("темы: " + ", ".join(key_terms))
+    
+    expanded = " | ".join(parts)
+    print(f"[RAG][Chat] followup expanded: '{message[:50]}' → '{expanded[:100]}'")
+    return expanded
+
+
 # START_BLOCK_CHAT_STREAM
 def _stream_chat_response(messages: list):
     """Call OpenRouter streaming API with Nemotron Nano. Yields SSE event strings.
@@ -226,8 +308,17 @@ def chat_send(session_id: str, message: str):
     # Cleanup old sessions periodically
     _cleanup_expired_sessions()
 
-    # Step 1: RAG search
-    search_result = _rag_search(message)
+    # Step 1: Expand follow-up queries with chat context
+    session = _chat_get_session(session_id)
+    history = session.get("messages", []) if session else []
+    
+    if _is_followup_query(message) and history:
+        search_query = _expand_followup_query(message, history)
+    else:
+        search_query = message
+
+    # Step 2: RAG search (with potentially expanded query)
+    search_result = _rag_search(search_query)
 
     if search_result.get("error") and not search_result.get("sources"):
         yield f"data: {json.dumps({'type': 'error', 'message': search_result['error']}, ensure_ascii=False)}\n\n"
