@@ -18,6 +18,7 @@ import requests as http_requests
 import config
 from rag.search import _rag_search
 from rag.prompts import RAG_SYSTEM_PROMPT
+from rag.guardrails import _escape_xml, _detect_injection_attempt
 
 # In-memory chat sessions: {session_id: {"messages": [...], "created_at": datetime}}
 _chat_sessions = OrderedDict()
@@ -98,28 +99,6 @@ def _cleanup_expired_sessions():
         if expired:
             print(f"[RAG][Chat] cleaned {len(expired)} expired sessions")
 # END_BLOCK_CHAT_SESSIONS
-
-
-# START_BLOCK_CHAT_PROMPT_GUARDS
-def _escape_xml(text: str) -> str:
-    """Escape XML special chars to prevent injection."""
-    if not text:
-        return text
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;")
-
-
-def _detect_injection_attempt(text: str) -> bool:
-    """Detect common prompt injection patterns. Returns True if suspicious."""
-    if not text:
-        return False
-    text_lower = text.lower()
-    injection_keywords = [
-        "забудь", "forget", "ignore", "system prompt", "системный промпт",
-        "инструкция", "instruction", "execute", "выполни",
-        "new instructions", "новые инструкции",
-    ]
-    return any(kw in text_lower for kw in injection_keywords)
-# END_BLOCK_CHAT_PROMPT_GUARDS
 
 
 # START_BLOCK_CHAT_PROMPT
