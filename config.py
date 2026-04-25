@@ -110,6 +110,7 @@ def load_env():
 
 
 def _persist_provider_to_env():
+    global RAG_CHAT_MODEL
     env_path = BASE_DIR / ".env"
     if not env_path.exists():
         return
@@ -133,7 +134,6 @@ def _persist_provider_to_env():
             text += f"\nRAG_CHAT_MODEL={rag_chat_model}\n"
         env_path.write_text(text, encoding="utf-8")
         # Also update runtime config
-        global RAG_CHAT_MODEL
         RAG_CHAT_MODEL = rag_chat_model
     except Exception as e:
         print(f"[Provider] persist to .env failed: {e}")
