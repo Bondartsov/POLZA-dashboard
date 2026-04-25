@@ -197,6 +197,17 @@ async function loadProviderConfig() {
       const ragDd = document.getElementById('ragChatModelDropdown');
       if (ragDd && cfg.ragChat.model) ragDd.value = cfg.ragChat.model;
     }
+    // Embedding provider radio buttons
+    if (cfg.embedding) {
+      const embRadios = document.querySelectorAll('input[name="embedding"]');
+      embRadios.forEach(r => r.checked = (r.value === cfg.embedding.provider));
+      const embStatus = document.getElementById('embeddingStatus');
+      if (embStatus) {
+        embStatus.textContent = cfg.embedding.provider === 'qwen' 
+          ? '⚡ Qwen 3 Embed 8B (cloud, fast)' 
+          : '🏠 Ollama nomic (local, slow)';
+      }
+    }
     // Default provider badge — show what's saved in .env
     updateDefaultBadge(cfg);
   } catch(e) { console.warn('provider config load failed:', e); }
@@ -242,6 +253,23 @@ async function setRagChatModel(model) {
     if (S.providerConfig && S.providerConfig.ragChat) S.providerConfig.ragChat.model = model;
     console.log('[RAG Chat] model switched to', model);
   } catch(e) { console.warn('RAG chat model switch failed:', e); }
+}
+
+async function setEmbeddingProvider(provider) {
+  try {
+    const r = await fetch('/api/provider/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({embeddingProvider: provider}),
+    });
+    if (!r.ok) return;
+    if (S.providerConfig && S.providerConfig.embedding) S.providerConfig.embedding.provider = provider;
+    const statusEl = document.getElementById('embeddingStatus');
+    if (statusEl) {
+      statusEl.textContent = provider === 'qwen' ? '⚡ Qwen 3 Embed 8B (cloud, fast)' : '🏠 Ollama nomic (local, slow)';
+    }
+    console.log('[Embedding] provider switched to', provider);
+  } catch(e) { console.warn('Embedding provider switch failed:', e); }
 }
 
 async function setDefaultProvider() {

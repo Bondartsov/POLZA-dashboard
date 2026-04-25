@@ -79,6 +79,24 @@
         Sync с Polza.AI каждые 5 мин · анализ при включении
       </div>
     </div>
+    <div class="embedding-toggle" style="margin-top:8px">
+      <h4 style="font-size:12px;margin-bottom:4px">📊 Векторизация</h4>
+      <label class="provider-option">
+        <input type="radio" name="embedding" value="ollama" onchange="setEmbeddingProvider('ollama')" checked>
+        <span class="provider-label">
+          <span class="provider-icon">🏠</span> Ollama Local
+          <span class="provider-info" style="font-size:9px;color:var(--text3)">nomic · free · ~1s</span>
+        </span>
+      </label>
+      <label class="provider-option">
+        <input type="radio" name="embedding" value="qwen" onchange="setEmbeddingProvider('qwen')">
+        <span class="provider-label">
+          <span class="provider-icon">⚡</span> Qwen 3 Embed
+          <span class="provider-info" style="font-size:9px;color:var(--text3)">8B · 0.88₽/M · ~100ms</span>
+        </span>
+      </label>
+      <div id="embeddingStatus" style="font-size:9px;color:var(--text3);margin-top:2px;padding-left:4px"></div>
+    </div>
     <div class="theme-toggle">
       <input type="checkbox" id="themeSwitch" onchange="toggleTheme()">
       <span>Светлая тема</span>

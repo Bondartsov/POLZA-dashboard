@@ -58,6 +58,12 @@ QDRANT_URL = "http://localhost:6335"
 QDRANT_COLLECTION = "Polza_user_logs"
 QDRANT_ENABLED = True
 
+# Embedding provider: "ollama" (local, free, slow) or "qwen" (cloud, cheap, fast)
+EMBEDDING_PROVIDER = "ollama"  # Default to local Ollama
+QWEN_EMBED_MODEL = "qwen/qwen3-embedding-8b"
+QWEN_EMBED_API_URL = "https://polza.ai/api/v1"  # Same as Polza API
+QWEN_EMBED_DIMENSIONS = 768
+
 RAG_CHAT_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
 RAG_CHAT_MODELS = {
     "nvidia/nemotron-3-nano-30b-a3b:free": "Nemotron 3 Nano 30B (fast)",
@@ -76,6 +82,7 @@ _provider_state = {
     "auto_analyze": False,
     "openrouter_model": OPENROUTER_MODEL,
     "rag_chat_model": RAG_CHAT_MODEL,
+    "embedding_provider": EMBEDDING_PROVIDER,  # "ollama" or "qwen"
 }
 
 

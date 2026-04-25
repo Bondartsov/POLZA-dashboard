@@ -5,6 +5,7 @@ from config import (
     OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL, OLLAMA_THINKING,
     OPENROUTER_MODEL, OPENROUTER_MODELS,
     RAG_CHAT_MODELS,
+    QWEN_EMBED_MODEL, QWEN_EMBED_API_URL,
     BASE_DIR,
 )
 
@@ -35,6 +36,13 @@ def api_provider_config():
         "ragChat": {
             "model": _provider_state.get("rag_chat_model", _config.RAG_CHAT_MODEL),
             "models": [{"id": k, "label": v} for k, v in RAG_CHAT_MODELS.items()],
+        },
+        "embedding": {
+            "provider": _provider_state.get("embedding_provider", "ollama"),
+            "providers": [
+                {"id": "ollama", "label": "Ollama (Local, Free, Slow)", "info": "nomic-embed-text-v2-moe, ~1s/request"},
+                {"id": "qwen", "label": "Qwen 3 Embedding 8B (Cloud, $0.0088/M, Fast)", "info": "0.88 РУБ/1M tokens, ~100ms/request"},
+            ],
         },
     }
     if provider == "ollama":
@@ -85,5 +93,21 @@ def api_provider_set():
             _provider_state["rag_chat_model"] = model
             _config.RAG_CHAT_MODEL = model
             print(f"[Provider] RAG chat model switched to {model}")
+    if "embeddingProvider" in data:
+        provider = data["embeddingProvider"]
+        if provider in ("ollama", "qwen"):
+            _provider_state["embedding_provider"] = provider
+            _config.EMBEDDING_PROVIDER = provider
+            # Reinitialize embedding functions
+            from embeddings import _get_embedding_functions
+            _embed_text, _extract_user_text_from_log = _get_embedding_functions()
+            print(f"[Provider] embedding provider switched to {provider}")
     _persist_provider_to_env()
-    return jsonify({"ok": True, "provider": _provider_state["provider"], "autoAnalyze": _provider_state["auto_analyze"], "openrouterModel": _provider_state.get("openrouter_model", OPENROUTER_MODEL), "ragChatModel": _provider_state.get("rag_chat_model", _config.RAG_CHAT_MODEL)})
+    return jsonify({
+        "ok": True,
+        "provider": _provider_state["provider"],
+        "autoAnalyze": _provider_state["auto_analyze"],
+        "openrouterModel": _provider_state.get("openrouter_model", OPENROUTER_MODEL),
+        "ragChatModel": _provider_state.get("rag_chat_model", _config.RAG_CHAT_MODEL),
+        "embeddingProvider": _provider_state.get("embedding_provider", "ollama"),
+    })
