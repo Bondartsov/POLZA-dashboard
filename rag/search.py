@@ -201,6 +201,79 @@ def _dossier_scroll(employee_name: str) -> list:
     except Exception as e:
         print(f"[RAG][Search][DOSSIER] scroll error: {e}")
         return []
+
+
+def _build_dossier_aggregation(employee_name: str, records: list) -> str:
+    """Build compact dossier summary from raw Qdrant records for LLM context.
+
+    Instead of sending all 1000+ records to LLM, we aggregate:
+    - total count
+    - top topics (by frequency)
+    - models used
+    - date range
+    - risk flags
+    - work vs non-work ratio
+    """
+    from collections import Counter
+
+    if not records:
+        return ""
+
+    topics = Counter()
+    models = Counter()
+    dates = []
+    risk_count = 0
+    non_work_count = 0
+    projects = Counter()
+
+    for r in records:
+        p = r.get("payload", {})
+        topic = p.get("topic", "")
+        if topic:
+            topics[topic] += 1
+        model = p.get("model_used", "")
+        if model:
+            models[model] += 1
+        created = p.get("created_at", "")
+        if created:
+            dates.append(created[:10])  # YYYY-MM-DD
+        is_work = p.get("is_work", True)
+        if not is_work:
+            non_work_count += 1
+
+    dates.sort()
+    total = len(records)
+
+    lines = [
+        f"ДОСЬЕ СОТРУДНИКА: {employee_name}",
+        f"Всего запросов: {total}",
+        f"Период: {dates[0] if dates else '?'} — {dates[-1] if dates else '?'}",
+        f"Рабочих: {total - non_work_count} | Подозрительных (не рабочих): {non_work_count}",
+        "",
+        f"ТОП-20 ТЕМ (из {len(topics)} уникальных):",
+    ]
+    for topic, count in topics.most_common(20):
+        lines.append(f"  • {topic} — {count} запросов")
+
+    if models:
+        lines.append("")
+        lines.append(f"МОДЕЛИ ({len(models)} уникальных):")
+        for model, count in models.most_common(10):
+            lines.append(f"  • {model} — {count} запросов")
+
+    if non_work_count > 0:
+        lines.append("")
+        lines.append(f"⚠️ ПОДОЗРИТЕЛЬНАЯ АКТИВНОСТЬ: {non_work_count} запросов с is_work=False")
+
+    # Add date distribution (last 7 days bucket)
+    if dates:
+        date_counts = Counter(dates)
+        lines.append("")
+        lines.append("АКТИВНОСТЬ ПО ДНЯМ (последние 14 дней):")
+        for d in sorted(date_counts.keys())[-14:]:
+            lines.append(f"  {d}: {date_counts[d]} запросов")
+
+    return "\n".join(lines)
 # END_BLOCK_DOSSIER_SCROLL
 
 
@@ -281,10 +354,38 @@ def _rag_search(query: str) -> dict:
     is_dossier = _is_dossier_query(query, employee_name)
 
     if is_dossier and employee_name:
-        # DOSSIER MODE: scroll all records for this employee
+        # DOSSIER MODE: scroll all records, build compact aggregation
         print(f"[RAG][Search][DOSSIER] activating dossier mode for '{employee_name}'")
         search_results = _dossier_scroll(employee_name)
         mode = "dossier"
+
+        if not search_results:
+            print(f"[RAG][Search][DOSSIER] no records for '{employee_name}'")
+            return {
+                "sources": [],
+                "context_block": f"ИСТОЧНИКИ: Для сотрудника '{employee_name}' не найдено записей.",
+                "count": 0,
+                "error": None,
+                "mode": mode
+            }
+
+        # Build compact aggregation instead of raw records
+        dossier_agg = _build_dossier_aggregation(employee_name, search_results)
+        total_count = len(search_results)
+
+        # For UI: enrich only top 30 records (sample for source chips)
+        sample_results = search_results[:30]
+        enriched = _enrich_sources(sample_results)
+
+        print(f"[RAG][Search][DOSSIER] '{employee_name}': {total_count} total, aggregation built, {len(enriched)} sample sources")
+
+        return {
+            "sources": enriched,
+            "context_block": dossier_agg,
+            "count": total_count,
+            "error": None,
+            "mode": mode
+        }
     else:
         # NORMAL MODE: hybrid search
         search_results = _qdrant_hybrid_search(query_vector, employee_name)
