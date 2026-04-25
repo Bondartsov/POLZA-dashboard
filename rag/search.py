@@ -305,7 +305,7 @@ def _build_employee_list_context() -> str:
                     if records:
                         p = records[0].payload
                         last_date = p.get("created_at", "")[:10]
-                        last_model = p.get("model_used", "")
+                        last_model = p.get("model_display_name", "") or p.get("model_used", "")
                     
                     employee_stats[name] = {
                         "total": total,
@@ -503,7 +503,7 @@ def _build_dossier_aggregation(employee_name: str, records: list) -> str:
         topic = p.get("topic", "")
         if topic:
             topics[topic] += 1
-        model = p.get("model_used", "")
+        model = p.get("model_display_name", "") or p.get("model_used", "")
         if model:
             models[model] += 1
         created = p.get("created_at", "")
@@ -601,8 +601,18 @@ def _enrich_sources(search_results: list) -> list:
             "is_work": summary_data.get("is_work", payload.get("is_work", True)) if summary_data else payload.get("is_work", True),
             "project_guess": summary_data.get("project_guess", "") or payload.get("project_guess", ""),
             "risk_flags": summary_data.get("risk_flags", []) or payload.get("risk_flags", []),
-            "model": payload.get("model_used", ""),
+            "model": payload.get("model_display_name", "") or payload.get("model_used", ""),
             "session_id": payload.get("session_id", ""),
+            "cost": payload.get("cost", 0),
+            "client_cost": payload.get("client_cost", 0),
+            "total_tokens": payload.get("total_tokens", 0),
+            "prompt_tokens": payload.get("prompt_tokens", 0),
+            "completion_tokens": payload.get("completion_tokens", 0),
+            "provider": payload.get("provider", ""),
+            "request_type": payload.get("request_type", ""),
+            "finish_reason": payload.get("finish_reason", ""),
+            "latency_ms": payload.get("latency_ms", 0),
+            "generation_time_ms": payload.get("generation_time_ms", 0),
         })
 
     return enriched

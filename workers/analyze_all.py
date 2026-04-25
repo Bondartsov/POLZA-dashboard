@@ -13,6 +13,7 @@ import requests as http_requests
 from providers.dispatcher import _llm_call_summarize
 from embeddings.embed import _embed_text, _extract_user_text_from_log
 from embeddings.qdrant import _qdrant_upsert
+from embeddings.payload import _build_qdrant_payload
 
 _analyze_all = {
     "running": False,
@@ -89,21 +90,11 @@ def _analyze_single_gen(gen_id: str) -> dict:
                     gen_meta = gen_obj.to_dict()
             finally:
                 dbs.close()
-            qdrant_payload = {
-                "generation_id": gen_id,
-                "user_text_snippet": total_text[:200],
-                "topic": parsed.get("topic", ""),
-                "summary": parsed.get("summary", ""),
-                "is_work": parsed.get("is_work", True),
-                "project_guess": parsed.get("project_guess", ""),
-                "risk_flags": parsed.get("risk_flags", []),
-                "session_id": getattr(gen_obj, "session_id", "") or gen_meta.get("sessionId", ""),
-                "api_key_name": gen_meta.get("apiKeyName", "") if gen_meta else "",
-                "model_used": gen_meta.get("modelDisplayName", "") if gen_meta else "",
-                "created_at": gen_meta.get("createdAt", "") if gen_meta else "",
-                "cost": float(gen_meta.get("cost", 0) or 0) if gen_meta else 0,
-                "total_tokens": int(gen_meta.get("usage", {}).get("total_tokens", 0) or 0) if gen_meta else 0,
-            }
+            qdrant_payload = _build_qdrant_payload(
+                gen_meta=gen_meta or {},
+                analysis=parsed,
+                user_text_snippet=total_text,
+            )
             _qdrant_upsert(gen_id, embed_result[0], qdrant_payload)
 
         return {"status": "ok"}

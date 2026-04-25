@@ -70,6 +70,13 @@ def _build_context_block(sources: list, mode: str = "search") -> str:
         risk_flags = src.get("risk_flags", [])
         model = src.get("model", "")
         score = src.get("score", 0)
+        cost = src.get("cost", 0)
+        total_tokens = src.get("total_tokens", 0)
+        project = src.get("project_guess", "")
+        provider = src.get("provider", "")
+        latency = src.get("latency_ms", 0)
+        finish_reason = src.get("finish_reason", "")
+        request_type = src.get("request_type", "")
 
         work_label = "Рабочая задача" if is_work else "⚠️ Подозрение на личное"
         risk_str = ", ".join(risk_flags) if risk_flags else "нет"
@@ -80,12 +87,26 @@ def _build_context_block(sources: list, mode: str = "search") -> str:
         lines.append("[Источник #{:d}] ID: {} | Сотрудник: {} | Дата: {}".format(
             i, gen_id[:12], employee, date_short
         ))
-        lines.append("  Тема: {} | Классификация: {} | Релевантность: {:.0f}%".format(
+        details = "Тема: {} | Классификация: {} | Релевантность: {:.0f}%".format(
             topic, work_label, score * 100
-        ))
+        )
+        if cost:
+            details += " | Стоимость: ${:.4f}".format(cost)
+        if total_tokens:
+            details += " | Токенов: {:,}".format(total_tokens)
+        lines.append("  " + details)
         lines.append("  Описание: {}".format(summary[:500]))
         if model:
-            lines.append("  Модель: {}".format(model))
+            model_info = "Модель: {}".format(model)
+            if provider:
+                model_info += " | Провайдер: {}".format(provider)
+            lines.append("  " + model_info)
+        if project:
+            lines.append("  Проект: {}".format(project))
+        if request_type:
+            lines.append("  Тип запроса: {} | Finish: {}".format(request_type, finish_reason or "?"))
+        if latency:
+            lines.append("  Латентность: {} мс".format(latency))
         if risk_flags:
             lines.append("  Флаги риска: {}".format(risk_str))
         lines.append("")
