@@ -101,26 +101,33 @@ class ContextBuilder:
         
         # START_BLOCK_EMPLOYEE_LIST_FORMAT
         try:
-            # Query employee list with aggregated stats
-            from sqlalchemy import func, text
+            # WAVE-2 FIX: Use parameterized queries to prevent SQL injection
+            from sqlalchemy import func, select
+            from db import GenerationSummary
             
-            query = text("""
-                SELECT DISTINCT key_name, COUNT(*) as count, 
-                       AVG(CASE WHEN is_work THEN 1 ELSE 0 END) as work_ratio
-                FROM generation_summaries
-                GROUP BY key_name
-                ORDER BY count DESC
-            """)
+            # ORM-based query (parameterized, safe)
+            stmt = select(
+                GenerationSummary.key_name,
+                func.count(GenerationSummary.id).label("count"),
+                func.avg(func.cast(GenerationSummary.is_work, int)).label("work_ratio")
+            ).group_by(GenerationSummary.key_name).order_by(func.count(GenerationSummary.id).desc())
             
-            results = self.db.execute(query).fetchall()
+            results = self.db.execute(stmt).fetchall()
             context = "**Список сотрудников команды:**\n\n"
             for row in results:
                 name, count, ratio = row
-                context += f"- {name}: {count} запросов ({ratio*100:.0f}% рабочих)\n"
+                ratio_val = (ratio or 0) * 100
+                context += f"- {name}: {count} запросов ({ratio_val:.0f}% рабочих)\n"
             
             return context
+        except (ValueError, TypeError, AttributeError) as e:
+            import logging
+            logging.error("Context building failed for EMPLOYEE_LIST mode", exc_info=True)
+            return "Ошибка при загрузке списка сотрудников (некорректные данные)"
         except Exception as e:
-            return f"Ошибка при загрузке списка: {e}"
+            import logging
+            logging.critical("Unexpected error in EMPLOYEE_LIST context", exc_info=True)
+            return "Системная ошибка при загрузке списка"
         # END_BLOCK_EMPLOYEE_LIST_FORMAT
     
     def _build_global_agg_context(self) -> str:
@@ -130,33 +137,35 @@ class ContextBuilder:
         
         # START_BLOCK_GLOBAL_AGG_FORMAT
         try:
-            from sqlalchemy import func, text
+            # WAVE-2 FIX: Use parameterized ORM queries (safe from SQL injection)
+            from sqlalchemy import func, select
+            from db import GenerationSummary
             
-            query = text("""
-                SELECT 
-                    COUNT(*) as total_gens,
-                    COUNT(DISTINCT key_name) as unique_employees,
-                    AVG(cost) as avg_cost,
-                    SUM(cost) as total_cost,
-                    AVG(tokens) as avg_tokens
-                FROM generation_summaries
-            """)
+            # ORM-based aggregation (parameterized, safe)
+            total_gens = self.db.query(func.count(GenerationSummary.id)).scalar() or 0
+            emp_count = self.db.query(func.count(func.distinct(GenerationSummary.key_name))).scalar() or 0
+            avg_cost = self.db.query(func.avg(GenerationSummary.cost)).scalar() or 0.0
+            total_cost = self.db.query(func.sum(GenerationSummary.cost)).scalar() or 0.0
+            avg_tokens = self.db.query(func.avg(GenerationSummary.tokens)).scalar() or 0.0
             
-            row = self.db.execute(query).fetchone()
-            if not row:
+            if not total_gens:
                 return "Нет данных для статистики."
-            
-            total_gens, emp_count, avg_cost, total_cost, avg_tokens = row
             
             context = "**Глобальная статистика:**\n\n"
             context += f"- Всего генераций: {total_gens}\n"
             context += f"- Уникальных сотрудников: {emp_count}\n"
-            context += f"- Средние затраты на запрос: ${avg_cost:.2f}\n"
-            context += f"- Всего затрат: ${total_cost:.2f}\n"
-            context += f"- Средние токены: {avg_tokens:.0f}\n"
+            context += f"- Средние затраты на запрос: ${float(avg_cost):.2f}\n"
+            context += f"- Всего затрат: ${float(total_cost):.2f}\n"
+            context += f"- Средние токены: {float(avg_tokens):.0f}\n"
             
             return context
+        except (ValueError, TypeError, AttributeError) as e:
+            import logging
+            logging.error("Context building failed for GLOBAL_AGG mode", exc_info=True)
+            return "Ошибка при расчете статистики (некорректные данные)"
         except Exception as e:
-            return f"Ошибка при расчете статистики: {e}"
+            import logging
+            logging.critical("Unexpected error in GLOBAL_AGG context", exc_info=True)
+            return "Системная ошибка при расчете статистики"
         # END_BLOCK_GLOBAL_AGG_FORMAT
 # END_BLOCK_CONTEXT_BUILDER_CLASS

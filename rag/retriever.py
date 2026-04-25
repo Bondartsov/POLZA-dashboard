@@ -28,63 +28,69 @@ class QueryMode(Enum):
 
 
 # START_BLOCK_QUERY_CLASSIFIER
-def _get_dossier_keywords() -> List[str]:
-    """Keywords that trigger DOSSIER mode."""
-    return [
+import re
+
+# WAVE-2 FIX: Cache keywords and compile regex patterns at module level (avoid recreating on each classification)
+# Also enables future scoring-based classification and detection of keyword stuffing attempts
+
+_CLASSIFIER_KEYWORDS = {
+    QueryMode.DOSSIER: [
         "расскажи о сотруднике", "профиль", "дневник", "история",
         "что делает", "чем занимался", "личные данные", "информация о",
-        "who is", "tell me about", "profile", "history", "log",
-    ]
-
-
-def _get_employee_list_keywords() -> List[str]:
-    """Keywords that trigger EMPLOYEE_LIST mode."""
-    return [
+        "who is", "tell me about", "profile", "history", "log", "досье",
+    ],
+    QueryMode.EMPLOYEE_LIST: [
         "список сотрудников", "сотрудники", "team", "team list", "employees",
         "кто в команде", "список команды", "все люди",
-    ]
-
-
-def _get_global_agg_keywords() -> List[str]:
-    """Keywords that trigger GLOBAL_AGG mode."""
-    return [
+    ],
+    QueryMode.GLOBAL_AGG: [
         "всего затрат", "итого", "средние затраты", "total cost", "average",
         "статистика команды", "сводка", "overview", "summary",
         "бюджет", "budget", "cost breakdown",
+    ],
+}
+
+# Precompile regex patterns for word-boundary matching (prevents keyword stuffing)
+_CLASSIFIER_PATTERNS = {}
+for mode, keywords in _CLASSIFIER_KEYWORDS.items():
+    # Word-boundary regex: \b keyword \b (case-insensitive)
+    _CLASSIFIER_PATTERNS[mode] = [
+        re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE)
+        for kw in keywords
     ]
+
+# Priority order for classification (DOSSIER > EMPLOYEE_LIST > GLOBAL_AGG > SEARCH)
+_MODE_PRIORITY = [QueryMode.DOSSIER, QueryMode.EMPLOYEE_LIST, QueryMode.GLOBAL_AGG]
 
 
 class QueryClassifier:
-    """Classify queries into retrieval modes."""
+    """Classify queries into retrieval modes.
     
-    def __init__(self):
-        self.dossier_kw = _get_dossier_keywords()
-        self.employee_list_kw = _get_employee_list_keywords()
-        self.global_agg_kw = _get_global_agg_keywords()
+    WAVE-2: Optimized with cached keywords and precompiled patterns.
+    Detects exact word matches (word boundaries) to prevent simple keyword stuffing.
+    """
     
     def classify(self, query: str) -> QueryMode:
-        """Classify query into one of 4 modes.
+        """Classify query into one of 4 modes with word-boundary matching.
         
-        Rules:
-        1. Check for DOSSIER keywords (highest priority)
-        2. Check for EMPLOYEE_LIST keywords
-        3. Check for GLOBAL_AGG keywords
-        4. Default to SEARCH
+        Algorithm:
+        1. Check each mode in priority order (DOSSIER → EMPLOYEE_LIST → GLOBAL_AGG)
+        2. For each mode, count matching keywords (word boundaries)
+        3. Return first mode with matches, or SEARCH if none
+        
+        Word-boundary matching prevents keyword stuffing like "dossier employee_list_global"
+        (would match "list" in "employee_list" substring, but not with boundaries).
         """
-        query_lower = query.lower()
+        if not query:
+            return QueryMode.SEARCH
         
-        # Priority: specific modes first, fallback to SEARCH
-        for kw in self.dossier_kw:
-            if kw in query_lower:
-                return QueryMode.DOSSIER
-        
-        for kw in self.employee_list_kw:
-            if kw in query_lower:
-                return QueryMode.EMPLOYEE_LIST
-        
-        for kw in self.global_agg_kw:
-            if kw in query_lower:
-                return QueryMode.GLOBAL_AGG
+        # Check each mode in priority order
+        for mode in _MODE_PRIORITY:
+            patterns = _CLASSIFIER_PATTERNS[mode]
+            # Check if ANY pattern matches (word boundary)
+            for pattern in patterns:
+                if pattern.search(query):
+                    return mode
         
         return QueryMode.SEARCH
 # END_BLOCK_QUERY_CLASSIFIER

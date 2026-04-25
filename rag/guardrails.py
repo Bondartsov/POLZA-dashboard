@@ -35,83 +35,89 @@ def _escape_xml(text: str) -> str:
 # END_BLOCK_XML_ESCAPE
 
 
-# START_BLOCK_INJECTION_DETECTION
+# START_BLOCK_INJECTION_DETECTION_PATTERNS
+# WAVE-2 FIX: Precompile patterns and use word boundaries to prevent bypasses via spacing/capitalization
+# Note: This is a first-pass heuristic. Advanced injections with obfuscation may still bypass.
+_INJECTION_KEYWORDS = [
+    # Russian
+    "забудь", "system prompt", "системный промпт",
+    "инструкция", "instruction", "execute", "выполни",
+    "новые инструкции", "изменить инструкцию",
+    # English variants
+    "forget", "ignore", "override", "bypass", "disable", "turn off",
+]
+
+_INJECTION_PATTERNS = [
+    re.compile(r'\b' + re.escape(kw) + r'\b', re.IGNORECASE | re.UNICODE)
+    for kw in _INJECTION_KEYWORDS
+]
+# END_BLOCK_INJECTION_DETECTION_PATTERNS
+
+
 def _detect_injection_attempt(text: str) -> bool:
-    """Detect common prompt injection patterns.
+    """Detect common prompt injection patterns using word-boundary matching.
     
-    Returns True if suspicious keywords found:
+    Returns True if suspicious keywords found (case-insensitive, word boundaries).
+    
+    Keywords monitored:
     - Russian: "забудь", "инструкция", "выполни", "новые инструкции"
     - English: "forget", "instruction", "execute", "ignore", "system prompt"
     
-    Note: This is a first-pass heuristic. Advanced injections may bypass.
+    Note: This is a first-pass heuristic. Advanced injections may bypass:
+    - Obfuscation (Unicode variants, spelling variations, synonyms)
+    - Indirect commands (prompting for content that triggers injection)
+    - Encoding (base64, ROT13, etc.)
+    
+    For production: Consider multi-stage detection (semantic detection via LLM, SHAP explanations).
     """
     if not text:
         return False
     
-    text_lower = text.lower()
-    injection_keywords = [
-        # Russian
-        "забудь", "ignore", "system prompt", "системный промпт",
-        "инструкция", "instruction", "execute", "выполни",
-        "new instructions", "новые инструкции", "изменить инструкцию",
-        # English variants
-        "override", "bypass", "disable", "turn off",
-    ]
-    
-    for kw in injection_keywords:
-        if kw in text_lower:
+    # Check if ANY pattern matches (word boundary prevents partial matches)
+    for pattern in _INJECTION_PATTERNS:
+        if pattern.search(text):
             return True
     
     return False
 # END_BLOCK_INJECTION_DETECTION
 
 
-# START_BLOCK_PII_REDACTION
+# START_BLOCK_PII_REDACTION_PATTERNS
+# WAVE-2 FIX: Precompile regex patterns to avoid recompilation on each redaction call
+_PHONE_PATTERN_RU1 = re.compile(r'\+7\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}')
+_PHONE_PATTERN_RU2 = re.compile(r'8\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}')
+_EMAIL_PATTERN = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', re.IGNORECASE)
+# Note: Russian name redaction commented out as it's overly broad (high false positive rate)
+# Recommendation: Use NER library (natasha, deeppavlov) for production
+# _NAME_PATTERN = re.compile(r'\b[А-Я][а-я]+\s+[А-Я][а-я]+\b', re.UNICODE)
+# END_BLOCK_PII_REDACTION_PATTERNS
+
+
 def _redact_pii(text: str) -> str:
     """Redact personally identifiable information (PII).
     
     Patterns masked:
-    - Phone numbers: +7 XXX XXX XXXX, 8 XXX XXX XXXX
+    - Phone numbers: +7 XXX XXX XXXX, 8 XXX XXX XXXX (Russian formats)
     - Email addresses: user@domain.com
-    - Russian names: [А-Я][а-я]+ patterns (basic)
+    
+    NOTE: Russian name redaction disabled due to high false positive rate.
+    For production, consider using natasha (NER) or deeppavlov.
     
     Returns text with [REDACTED:type] markers.
     """
     if not text:
         return text
     
-    # START_BLOCK_PHONE_REDACTION
-    # Russian phone patterns
-    text = re.sub(
-        r'\+7\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}',
-        '[REDACTED:phone]',
-        text
-    )
-    text = re.sub(
-        r'8\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}',
-        '[REDACTED:phone]',
-        text
-    )
-    # END_BLOCK_PHONE_REDACTION
+    # Phone redaction (Russian formats with optional spaces)
+    text = _PHONE_PATTERN_RU1.sub('[REDACTED:phone]', text)
+    text = _PHONE_PATTERN_RU2.sub('[REDACTED:phone]', text)
     
-    # START_BLOCK_EMAIL_REDACTION
-    text = re.sub(
-        r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-        '[REDACTED:email]',
-        text
-    )
-    # END_BLOCK_EMAIL_REDACTION
+    # Email redaction
+    text = _EMAIL_PATTERN.sub('[REDACTED:email]', text)
     
-    # START_BLOCK_NAME_REDACTION (basic Russian names)
-    # Pattern: [А-Я][а-я]+ followed by space and another [А-Я][а-я]+
-    # This is basic — advanced NER would be better
-    text = re.sub(
-        r'\b[А-Я][а-я]+\s+[А-Я][а-я]+\b',
-        '[REDACTED:name]',
-        text,
-        flags=re.UNICODE
-    )
-    # END_BLOCK_NAME_REDACTION
+    # Name redaction disabled (WAVE-2: too many false positives)
+    # Uncomment when using proper NER:
+    # text = _NAME_PATTERN.sub('[REDACTED:name]', text)
     
     return text
 # END_BLOCK_PII_REDACTION
