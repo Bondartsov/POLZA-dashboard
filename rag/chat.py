@@ -176,6 +176,8 @@ def _stream_chat_response(messages: list):
 
     # Stream response chunks
     try:
+        # Force UTF-8 decoding — requests defaults to ISO-8859-1 for text/event-stream
+        r.encoding = 'utf-8'
         for line in r.iter_lines(decode_unicode=True):
             if not line:
                 continue
