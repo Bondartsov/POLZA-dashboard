@@ -746,22 +746,10 @@ def _rag_search(query: str) -> dict:
     if not search_results:
         print(f"[RAG][Search] query='{query[:50]}' found=0 sources (mode={mode})")
         
-        # FALLBACK: if employee name was detected but semantic search found nothing,
-        # auto-activate dossier mode so the user still gets data about the employee
-        if employee_name:
-            print(f"[RAG][Search] fallback to dossier for '{employee_name}' — semantic search returned 0")
-            dossier_records = _dossier_scroll(employee_name)
-            if dossier_records:
-                dossier_agg = _build_dossier_aggregation(employee_name, dossier_records)
-                sample_enriched = _enrich_sources(dossier_records[:30])
-                return {
-                    "sources": sample_enriched,
-                    "context_block": dossier_agg,
-                    "count": len(dossier_records),
-                    "error": None,
-                    "mode": "dossier"
-                }
-        
+        # START_BLOCK_WAVE1_FIX_1
+        # WAVE-1 FIX: Removed auto-dossier fallback (security — was causing PII leakage)
+        # If semantic search returns 0, return empty sources (no automatic dossier expansion)
+        # This prevents accidental disclosure of employee data via false name detection
         return {
             "sources": [],
             "context_block": "ИСТОЧНИКИ: По вашему запросу не найдено релевантных данных.",
@@ -769,6 +757,7 @@ def _rag_search(query: str) -> dict:
             "error": None,
             "mode": mode
         }
+        # END_BLOCK_WAVE1_FIX_1
 
     # Step 4: Enrich from PostgreSQL
     enriched = _enrich_sources(search_results)
@@ -776,14 +765,12 @@ def _rag_search(query: str) -> dict:
     # Step 5: Build context block
     context_block = _build_context_block(enriched, mode)
 
-    # Step 6: If employee was detected, ALWAYS supplement with mini-dossier
-    # This ensures LLM has employee overview even for vague/abstract queries
-    if employee_name and mode == "search":
-        dossier_records = _dossier_scroll(employee_name)
-        if dossier_records:
-            dossier_agg = _build_dossier_aggregation(employee_name, dossier_records)
-            context_block = dossier_agg + "\n\n---\n\n" + context_block
-            print(f"[RAG][Search] supplemented context with mini-dossier for '{employee_name}' ({len(dossier_records)} records)")
+    # START_BLOCK_WAVE1_FIX_2
+    # WAVE-1 FIX: Removed automatic mini-dossier supplement (security)
+    # Previously: if employee_name detected → ALWAYS add full mini-dossier to context
+    # This was causing unintended PII disclosure even for queries unrelated to the employee
+    # New behavior: Use employee filter ONLY if query explicitly asks for employee, via modes
+    # END_BLOCK_WAVE1_FIX_2
 
     print(f"[RAG][Search] query='{query[:50]}' found={len(enriched)} sources mode={mode}"
           + (f" (filter: {employee_name})" if employee_name else ""))

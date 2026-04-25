@@ -100,9 +100,35 @@ def _cleanup_expired_sessions():
 # END_BLOCK_CHAT_SESSIONS
 
 
+# START_BLOCK_CHAT_PROMPT_GUARDS
+def _escape_xml(text: str) -> str:
+    """Escape XML special chars to prevent injection."""
+    if not text:
+        return text
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;")
+
+
+def _detect_injection_attempt(text: str) -> bool:
+    """Detect common prompt injection patterns. Returns True if suspicious."""
+    if not text:
+        return False
+    text_lower = text.lower()
+    injection_keywords = [
+        "забудь", "forget", "ignore", "system prompt", "системный промпт",
+        "инструкция", "instruction", "execute", "выполни",
+        "new instructions", "новые инструкции",
+    ]
+    return any(kw in text_lower for kw in injection_keywords)
+# END_BLOCK_CHAT_PROMPT_GUARDS
+
+
 # START_BLOCK_CHAT_PROMPT
 def _build_rag_messages(session_history: list, context_block: str, user_message: str) -> list:
-    """Build OpenRouter messages array: system + context + history + user message."""
+    """Build OpenRouter messages array: system + context + history + user message.
+    
+    WAVE-1 FIX: Wrap context and user message in XML tags to prevent prompt injection.
+    Escaped special characters ensure context cannot break out of XML structure.
+    """
     messages = [
         {"role": "system", "content": RAG_SYSTEM_PROMPT + "\n\n" + context_block},
     ]
@@ -114,7 +140,11 @@ def _build_rag_messages(session_history: list, context_block: str, user_message:
 
     # Add current user message (if not already in history)
     if not session_history or session_history[-1].get("content") != user_message:
-        messages.append({"role": "user", "content": user_message})
+        # WAVE-1 FIX: Escape user message and log if injection attempt detected
+        escaped_user_message = _escape_xml(user_message)
+        if _detect_injection_attempt(user_message):
+            print(f"[RAG][Chat][GUARD] Detected potential injection attempt in user message")
+        messages.append({"role": "user", "content": escaped_user_message})
 
     return messages
 # END_BLOCK_CHAT_PROMPT

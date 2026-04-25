@@ -65,7 +65,7 @@ RAG_CHAT_MODELS = {
     "google/gemma-4-31b-it:free": "Gemma 4 31B",
 }
 RAG_MAX_SOURCES = 20
-RAG_MIN_SCORE = 0.15
+RAG_MIN_SCORE = 0.4  # WAVE-1 FIX: raised from 0.15 (was too permissive, accepted noise)
 RAG_MAX_HISTORY = 20
 RAG_MAX_TOKENS = 2000
 RAG_TEMPERATURE = 0.3
