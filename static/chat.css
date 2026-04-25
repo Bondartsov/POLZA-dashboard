@@ -116,12 +116,27 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    margin-bottom: 6px;
+    margin-bottom: 0;
+    transition: margin-bottom 0.15s;
 }
-.chat-source-chips {
+.sources-toggle {
+    cursor: pointer;
+    user-select: none;
+}
+.sources-toggle:hover {
+    color: var(--text-primary, #eee);
+}
+.chat-source-chips.sources-collapsed {
+    display: none;
+}
+.chat-source-chips.sources-expanded {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+    margin-top: 6px;
+}
+.sources-expanded ~ .sources-label {
+    margin-bottom: 6px;
 }
 .chat-source-chip {
     display: inline-block;

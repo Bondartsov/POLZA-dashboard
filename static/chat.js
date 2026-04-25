@@ -253,21 +253,22 @@
         bar.className = "chat-sources-bar";
 
         const label = document.createElement("div");
-        label.className = "sources-label";
-        const modeTag = mode === "dossier" ? ' 📋 Досье' : '';
-        label.textContent = "💡 Найдено " + count + " источников" + modeTag;
+        label.className = "sources-label sources-toggle";
+        const modeTag = mode === "dossier" ? ' 📋 Досье' : mode === "employee_list" ? ' 👥 Сотрудники' : '';
+        const arrow = "▶";
+        label.textContent = arrow + " 💡 Найдено " + count + " источников" + modeTag;
         bar.appendChild(label);
 
         if (sources && sources.length > 0) {
             const chips = document.createElement("div");
-            chips.className = "chat-source-chips";
-            sources.slice(0, 10).forEach(function(s) {
+            chips.className = "chat-source-chips sources-collapsed";
+            sources.slice(0, 15).forEach(function(s) {
                 const chip = document.createElement("span");
                 chip.className = "chat-source-chip";
-                chip.textContent = (s.topic || s.id || "src").substring(0, 25);
+                chip.textContent = (s.topic || s.id || "src").substring(0, 30);
                 chip.title = (s.employee || "") + " | score: " + (s.score || 0);
-                chip.onclick = function() {
-                    // Try to open detail modal if function exists
+                chip.onclick = function(e) {
+                    e.stopPropagation();
                     if (typeof window.openDetail === "function") {
                         window.openDetail(s.id);
                     }
@@ -275,6 +276,20 @@
                 chips.appendChild(chip);
             });
             bar.appendChild(chips);
+
+            // Toggle collapse/expand on label click
+            label.onclick = function() {
+                const isCollapsed = chips.classList.contains("sources-collapsed");
+                if (isCollapsed) {
+                    chips.classList.remove("sources-collapsed");
+                    chips.classList.add("sources-expanded");
+                    label.textContent = "▼" + label.textContent.substring(1);
+                } else {
+                    chips.classList.remove("sources-expanded");
+                    chips.classList.add("sources-collapsed");
+                    label.textContent = arrow + label.textContent.substring(1);
+                }
+            };
         }
 
         aiDiv.appendChild(bar);

@@ -16,15 +16,18 @@ from rag.prompts import _build_context_block
 
 # Employee names cache — loaded once from DB
 _employee_names = None
+_employee_names_non_system = None
 
 
 def _get_employee_names():
     """Load employee names from api_keys table. Cached for process lifetime."""
-    global _employee_names
+    global _employee_names, _employee_names_non_system
     if _employee_names is not None:
         return _employee_names
 
     _employee_names = []
+    _employee_names_non_system = []
+    _system_prefixes = ("AI-", "Основной", "Системный")
     try:
         session = get_session()
         try:
@@ -32,13 +35,18 @@ def _get_employee_names():
                 ApiKey.name.isnot(None), ApiKey.name != ""
             ).all()
             _employee_names = [k[0] for k in keys]
+            _employee_names_non_system = [
+                k for k in _employee_names
+                if not any(k.startswith(p) for p in _system_prefixes)
+            ]
         finally:
             session.close()
     except Exception as e:
         print(f"[RAG][Search] employee names load failed: {e}")
         _employee_names = []
+        _employee_names_non_system = []
 
-    print(f"[RAG][Search] loaded {len(_employee_names)} employee names")
+    print(f"[RAG][Search] loaded {len(_employee_names)} employee names ({len(_employee_names_non_system)} non-system)")
     return _employee_names
 
 
@@ -56,6 +64,97 @@ def _detect_employee_filter(query: str):
                 print(f"[RAG][Search] employee filter: {name} (matched '{part}')")
                 return name
     return None
+
+
+_EMPLOYEE_LIST_KEYWORDS = [
+    "фио", "фио всех", "список сотрудников", "кто делает запросы", "кто делает",
+    "кто использует", "кто пользуется", "все сотрудники", "всех сотрудников",
+    "имена", "кто запрос", "кто отправляет", "перечисли сотрудников",
+    "список пользователей", "участники команды", "кто из команды",
+    "сколько сотрудников", "какие сотрудники",
+]
+
+
+def _is_employee_list_query(query: str) -> bool:
+    """Detect if user asks for a list of all employees (not about a specific person)."""
+    query_lower = query.lower()
+    return any(kw in query_lower for kw in _EMPLOYEE_LIST_KEYWORDS)
+
+
+def _build_employee_list_context() -> str:
+    """Build context block listing all real employees with their stats from Qdrant.
+    
+    For each employee: name, total requests, date range, top models.
+    """
+    global _employee_names_non_system
+    if not _employee_names_non_system:
+        _get_employee_names()
+    
+    names = _employee_names_non_system or []
+    if not names:
+        return "ИСТОЧНИКИ: Список сотрудников недоступен."
+    
+    lines = [
+        f"СПИСОК ВСЕХ СОТРУДНИКОВ, ДЕЛАЮЩИХ AI-ЗАПРОСЫ ({len(names)} человек):",
+        ""
+    ]
+    
+    # Try to get per-employee stats from Qdrant
+    client = _get_qdrant_client()
+    employee_stats = {}
+    
+    if client:
+        try:
+            _qdrant_ensure_collection()
+            for name in sorted(names):
+                try:
+                    from qdrant_client.models import FieldCondition, Filter, MatchValue, CountResult
+                    
+                    emp_filter = Filter(
+                        must=[FieldCondition(key="api_key_name", match=MatchValue(value=name))]
+                    )
+                    count_result = client.count(
+                        collection_name=QDRANT_COLLECTION,
+                        count_filter=emp_filter,
+                    )
+                    total = count_result.count
+                    
+                    # Get date range + last model via scroll (limit 1 for latest)
+                    records, _ = client.scroll(
+                        collection_name=QDRANT_COLLECTION,
+                        scroll_filter=emp_filter,
+                        limit=1,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    
+                    last_date = ""
+                    last_model = ""
+                    if records:
+                        p = records[0].payload
+                        last_date = p.get("created_at", "")[:10]
+                        last_model = p.get("model_used", "")
+                    
+                    employee_stats[name] = {
+                        "total": total,
+                        "last_date": last_date,
+                        "last_model": last_model,
+                    }
+                except Exception as e:
+                    print(f"[RAG][Search] employee stat error for '{name}': {e}")
+                    employee_stats[name] = {"total": 0, "last_date": "", "last_model": ""}
+        except Exception as e:
+            print(f"[RAG][Search] employee list stats error: {e}")
+    
+    for i, name in enumerate(sorted(names), 1):
+        stats = employee_stats.get(name, {})
+        total = stats.get("total", 0)
+        if total > 0:
+            lines.append(f"{i}. {name} — {total} запросов, последняя активность: {stats.get('last_date', '?')}, модель: {stats.get('last_model', '?')}")
+        else:
+            lines.append(f"{i}. {name} — запросов не найдено")
+    
+    return "\n".join(lines)
 
 
 _DOSSIER_KEYWORDS = [
@@ -225,6 +324,7 @@ def _build_dossier_aggregation(employee_name: str, records: list) -> str:
     risk_count = 0
     non_work_count = 0
     projects = Counter()
+    summaries_sample = []
 
     for r in records:
         p = r.get("payload", {})
@@ -240,6 +340,14 @@ def _build_dossier_aggregation(employee_name: str, records: list) -> str:
         is_work = p.get("is_work", True)
         if not is_work:
             non_work_count += 1
+        project = p.get("project_guess", "")
+        if project:
+            projects[project] += 1
+        # Collect summary snippets (for recent records)
+        summary = p.get("summary", "")
+        if summary and len(summaries_sample) < 30:
+            date_str = created[:10] if created else "?"
+            summaries_sample.append(f"  [{date_str}] {summary[:120]}")
 
     dates.sort()
     total = len(records)
@@ -261,17 +369,30 @@ def _build_dossier_aggregation(employee_name: str, records: list) -> str:
         for model, count in models.most_common(10):
             lines.append(f"  • {model} — {count} запросов")
 
+    if projects:
+        lines.append("")
+        lines.append(f"ПРОЕКТЫ ({len(projects)} уникальных):")
+        for proj, count in projects.most_common(10):
+            lines.append(f"  • {proj} — {count} запросов")
+
     if non_work_count > 0:
         lines.append("")
         lines.append(f"⚠️ ПОДОЗРИТЕЛЬНАЯ АКТИВНОСТЬ: {non_work_count} запросов с is_work=False")
 
-    # Add date distribution (last 7 days bucket)
+    # Add date distribution (last 14 days)
     if dates:
         date_counts = Counter(dates)
         lines.append("")
         lines.append("АКТИВНОСТЬ ПО ДНЯМ (последние 14 дней):")
         for d in sorted(date_counts.keys())[-14:]:
             lines.append(f"  {d}: {date_counts[d]} запросов")
+
+    # Add sample summaries
+    if summaries_sample:
+        lines.append("")
+        lines.append(f"ПРИМЕРЫ ЗАПРОСОВ (последние {len(summaries_sample)}):")
+        for s in summaries_sample:
+            lines.append(s)
 
     return "\n".join(lines)
 # END_BLOCK_DOSSIER_SCROLL
@@ -303,11 +424,11 @@ def _enrich_sources(search_results: list) -> list:
             "score": result["score"],
             "employee": payload.get("api_key_name", "Неизвестный"),
             "created_at": payload.get("created_at", ""),
-            "topic": summary_data.get("topic", payload.get("topic", "")) if summary_data else payload.get("topic", ""),
-            "summary": summary_data.get("summary", "") if summary_data else "",
-            "is_work": summary_data.get("is_work", True) if summary_data else payload.get("is_work", True),
-            "project_guess": summary_data.get("project_guess", "") if summary_data else "",
-            "risk_flags": summary_data.get("risk_flags", []) if summary_data else [],
+            "topic": summary_data.get("topic", "") or payload.get("topic", ""),
+            "summary": summary_data.get("summary", "") or payload.get("summary", ""),
+            "is_work": summary_data.get("is_work", payload.get("is_work", True)) if summary_data else payload.get("is_work", True),
+            "project_guess": summary_data.get("project_guess", "") or payload.get("project_guess", ""),
+            "risk_flags": summary_data.get("risk_flags", []) or payload.get("risk_flags", []),
             "model": payload.get("model_used", ""),
             "session_id": payload.get("session_id", ""),
         })
@@ -347,10 +468,26 @@ def _rag_search(query: str) -> dict:
     if not query_vector:
         return {"sources": [], "context_block": "", "count": 0, "error": "Embedding returned empty vector", "mode": "search"}
 
-    # Step 2: Detect employee filter
+    # Step 2: Check if this is an "employee list" query (special mode)
+    if _is_employee_list_query(query):
+        print(f"[RAG][Search] employee list query detected")
+        context_block = _build_employee_list_context()
+        # Also run semantic search for supporting data
+        search_results = _qdrant_hybrid_search(query_vector, None)
+        enriched = _enrich_sources(search_results) if search_results else []
+        
+        return {
+            "sources": enriched,
+            "context_block": context_block,
+            "count": len(enriched),
+            "error": None,
+            "mode": "employee_list"
+        }
+
+    # Step 3: Detect employee filter
     employee_name = _detect_employee_filter(query)
 
-    # Step 3: Check if Dossier mode
+    # Step 4: Check if Dossier mode
     is_dossier = _is_dossier_query(query, employee_name)
 
     if is_dossier and employee_name:

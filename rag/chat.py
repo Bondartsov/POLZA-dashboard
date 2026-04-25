@@ -27,7 +27,7 @@ _chat_lock = threading.Lock()
 _CHAT_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
 _MAX_HISTORY = 20
 _SESSION_TTL = 7200  # 2 hours
-_MAX_TOKENS = 2000
+_MAX_TOKENS = 8000
 _TEMPERATURE = 0.3
 _MAX_RETRIES = 4
 
