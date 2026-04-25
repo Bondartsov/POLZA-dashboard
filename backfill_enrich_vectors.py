@@ -14,12 +14,13 @@ import os
 import json
 import time
 
-# Load .env
+# Load .env and bootstrap app context
 from dotenv import load_dotenv
 load_dotenv()
 
-# Bootstrap Flask app context for DB access
-from config import get_session, gen_summary_get_many
+# Import config (triggers init_db + DB engine creation)
+import config
+from config import gen_summary_get_many
 from embeddings.qdrant import _get_qdrant_client, _qdrant_ensure_collection, QDRANT_COLLECTION
 
 
