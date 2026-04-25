@@ -91,7 +91,7 @@ def _build_context_block(sources: list, mode: str = "search") -> str:
             topic, work_label, score * 100
         )
         if cost:
-            details += " | Стоимость: ${:.4f}".format(cost)
+            details += " | Стоимость: {:.2f} ₽".format(cost)
         if total_tokens:
             details += " | Токенов: {:,}".format(total_tokens)
         lines.append("  " + details)

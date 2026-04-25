@@ -153,7 +153,7 @@ def _build_global_aggregation() -> str:
             total_team_tokens = sum(int(s.total_tokens or 0) for s in emp_stats)
             
             lines.append(f"Всего записей в БД: {total_team_requests} запросов")
-            lines.append(f"Общие расходы команды: ${total_team_cost:.4f}")
+            lines.append(f"Общие расходы команды: {total_team_cost:.2f} ₽")
             lines.append(f"Общее количество токенов: {total_team_tokens:,}")
             lines.append("")
             
@@ -173,7 +173,7 @@ def _build_global_aggregation() -> str:
                 pct = (cost / total_team_cost * 100) if total_team_cost > 0 else 0
                 
                 lines.append(f"  {i}. {name}{marker}")
-                lines.append(f"     Запросов: {req_count} | Стоимость: ${cost:.4f} ({pct:.1f}%) | Токенов: {tokens:,}")
+                lines.append(f"     Запросов: {req_count} | Стоимость: {cost:.2f} ₽ ({pct:.1f}%) | Токенов: {tokens:,}")
                 lines.append(f"     Период: {first} — {last}")
                 lines.append("")
             
@@ -198,7 +198,7 @@ def _build_global_aggregation() -> str:
                     m_cost = float(m.total_cost or 0)
                     m_count = int(m.total_requests or 0)
                     pct = (m_cost / total_team_cost * 100) if total_team_cost > 0 else 0
-                    lines.append(f"  {i}. {model_name} — {m_count} запросов, ${m_cost:.4f} ({pct:.1f}%)")
+                    lines.append(f"  {i}. {model_name} — {m_count} запросов, {m_cost:.2f} ₽ ({pct:.1f}%)")
                 lines.append("")
             
             # 3) Daily activity (last 14 days)
@@ -223,7 +223,7 @@ def _build_global_aggregation() -> str:
                     day_str = str(d.day) if d.day else "?"
                     day_cost = float(d.day_cost or 0)
                     day_cnt = int(d.cnt or 0)
-                    lines.append(f"  {day_str}: {day_cnt} запросов, ${day_cost:.4f}")
+                    lines.append(f"  {day_str}: {day_cnt} запросов, {day_cost:.2f} ₽")
                 lines.append("")
             
             # 4) Non-work / suspicious activity
