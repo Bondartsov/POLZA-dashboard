@@ -62,6 +62,7 @@ QDRANT_ENABLED = True
 EMBEDDING_PROVIDER = "ollama"  # Default to local Ollama
 QWEN_EMBED_MODEL = "qwen/qwen3-embedding-8b"
 QWEN_EMBED_API_URL = "https://polza.ai/api/v1"  # Same as Polza API
+QWEN_EMBED_API_KEY = ""  # Loaded from POLZA_API_KEY in .env
 QWEN_EMBED_DIMENSIONS = 768
 
 RAG_CHAT_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"

@@ -1,4 +1,5 @@
 # Embedding provider dispatcher: select between Ollama (local) and Qwen (cloud)
+import os
 from embeddings.qdrant import _get_qdrant_client, _qdrant_ensure_collection, _qdrant_upsert
 
 def _get_embedding_functions():
@@ -13,10 +14,15 @@ def _get_embedding_functions():
         # Wrap Qwen to match Ollama interface
         def _embed_text(text: str):
             """Embed via Qwen 3 Embedding 8B API."""
+            # Use POLZA_API_KEY from environment (loaded by config.load_env from .env)
+            api_key = os.environ.get("POLZA_API_KEY", config.QWEN_EMBED_API_KEY or "")
+            if not api_key:
+                print("[Embedding][Qwen] ERROR: No POLZA_API_KEY found in environment")
+                return None
             return _embed_text_qwen(
                 text,
                 api_url=config.QWEN_EMBED_API_URL,
-                api_key=config.AUTH_TOKEN,
+                api_key=api_key,
                 model=config.QWEN_EMBED_MODEL
             )
         
