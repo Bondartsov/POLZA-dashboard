@@ -55,7 +55,7 @@ def api_chat_status():
         client = _get_qdrant_client()
         if client:
             info = client.get_collection(QDRANT_COLLECTION)
-            vectors = info.points_count or 0
+            vectors = getattr(info, "points_count", 0) or 0
             qdrant_ok = True
     except Exception:
         pass

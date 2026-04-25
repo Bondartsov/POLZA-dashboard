@@ -68,50 +68,47 @@ def _qdrant_hybrid_search(query_vector: list, employee_name=None):
 
     results = {}  # generation_id -> {payload, score}
 
-    # A) Semantic search (always)
-    try:
-        from qdrant_client.models import models as qmodels
+    def _do_search(query_filter=None):
+        """Run a single search using qdrant_client query_points API."""
+        try:
+            from qdrant_client.models import models as qmodels
 
-        semantic = client.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=query_vector,
-            limit=30,
-            with_payload=True,
-        )
-        for r in semantic:
-            gid = r.payload.get("generation_id", "")
-            if gid:
-                results[gid] = {"payload": r.payload, "score": r.score}
-    except Exception as e:
-        print(f"[RAG][Search] semantic search error: {e}")
+            search_params = {
+                "collection_name": QDRANT_COLLECTION,
+                "query": query_vector,
+                "limit": 30,
+                "with_payload": True,
+            }
+            if query_filter:
+                search_params["query_filter"] = query_filter
+
+            response = client.query_points(**search_params)
+            for r in response.points:
+                gid = r.payload.get("generation_id", "")
+                if gid:
+                    results[gid] = {"payload": r.payload, "score": r.score}
+        except Exception as e:
+            print(f"[RAG][Search] search error: {e}")
+
+    # A) Semantic search (always)
+    _do_search()
 
     # B) Filtered search by employee name (if detected)
     if employee_name:
         try:
             from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-            filtered = client.search(
-                collection_name=QDRANT_COLLECTION,
-                query_vector=query_vector,
-                query_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="api_key_name",
-                            match=MatchValue(value=employee_name),
-                        )
-                    ]
-                ),
-                limit=30,
-                with_payload=True,
+            emp_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="api_key_name",
+                        match=MatchValue(value=employee_name),
+                    )
+                ]
             )
-            for r in filtered:
-                gid = r.payload.get("generation_id", "")
-                if gid:
-                    # Keep higher score if already exists
-                    if gid not in results or r.score > results[gid]["score"]:
-                        results[gid] = {"payload": r.payload, "score": r.score}
+            _do_search(query_filter=emp_filter)
         except Exception as e:
-            print(f"[RAG][Search] filtered search error: {e}")
+            print(f"[RAG][Search] filter build error: {e}")
 
     # Sort by score descending, take top RAG_MAX_SOURCES
     max_sources = getattr(config, "RAG_MAX_SOURCES", 20)
