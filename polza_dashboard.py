@@ -69,6 +69,13 @@ def main():
     auto_analyze_env = os.environ.get("AUTO_ANALYZE", "false").lower() in ("true", "1", "yes")
     _provider_state["auto_analyze"] = auto_analyze_env
 
+    # Embedding settings
+    config.EMBEDDING_PROVIDER = os.environ.get("EMBEDDING_PROVIDER", config.EMBEDDING_PROVIDER)
+    config.EMBEDDING_ENABLED = os.environ.get("EMBEDDING_ENABLED", "false").lower() in ("true", "1", "yes")
+    _provider_state["embedding_provider"] = config.EMBEDDING_PROVIDER
+    _provider_state["embedding_enabled"] = config.EMBEDDING_ENABLED
+    print(f"   Embedding: provider={config.EMBEDDING_PROVIDER}, enabled={config.EMBEDDING_ENABLED}")
+
     provider_icon = {"ollama": "On-Prem", "anthropic": "Cloud", "openrouter": "OpenRouter"}.get(config.LLM_PROVIDER, "?")
     print(f"LLM provider: {provider_icon} ({config.LLM_PROVIDER})")
     if config.LLM_PROVIDER == "ollama":

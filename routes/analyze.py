@@ -7,6 +7,9 @@ from config import (
     get_analysis_state, update_analysis_state, get_analysis_counts,
 )
 from workers.analyze_all import _analyze_all, _analyze_all_worker
+from workers.vectorize_existing import (
+    start_vectorize_existing, stop_vectorize_existing, get_vectorize_state,
+)
 
 analyze_bp = Blueprint('analyze', __name__)
 
@@ -139,3 +142,37 @@ def api_analyze_all_pause():
     update_analysis_state(status=state_label)
     print(f"[AnalyzeAll] {state_label}")
     return jsonify({"status": state_label})
+
+
+# ─── Vectorize-Existing endpoints ─────────────────────────────────────────────
+@analyze_bp.route("/api/vectorize-existing/start", methods=["POST"])
+def api_vectorize_existing_start():
+    """Start vectorization of existing summaries (no LLM, only embedding)."""
+    if not _provider_state.get("embedding_enabled", False):
+        return jsonify({"error": "embedding is disabled — enable it in sidebar first"}), 400
+    return jsonify(start_vectorize_existing())
+
+
+@analyze_bp.route("/api/vectorize-existing/stop", methods=["POST"])
+def api_vectorize_existing_stop():
+    return jsonify(stop_vectorize_existing())
+
+
+@analyze_bp.route("/api/vectorize-existing/status")
+def api_vectorize_existing_status():
+    state = get_vectorize_state()
+    # Also return count of unvectorized records
+    from config import GenerationSummary, get_session
+    s = get_session()
+    try:
+        unvec_count = s.query(GenerationSummary).filter(
+            GenerationSummary.is_vectorized == False
+        ).count()
+        total_summary_count = s.query(GenerationSummary).count()
+    finally:
+        s.close()
+    
+    state["unvectorizedCount"] = unvec_count
+    state["totalSummaryCount"] = total_summary_count
+    state["vectorizedCount"] = total_summary_count - unvec_count
+    return jsonify(state)

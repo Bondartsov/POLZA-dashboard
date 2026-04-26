@@ -26,6 +26,7 @@ from db import (
     gen_summary_get_many,
     gen_summary_upsert,
     gen_summary_delete,
+    gen_summary_mark_vectorized,
 )
 from db import AnalysisState, get_analysis_state, update_analysis_state, get_analysis_counts
 from sync_worker import SyncWorker, sync_all_keys
@@ -60,6 +61,7 @@ QDRANT_ENABLED = True
 
 # Embedding provider: "ollama" (local, free, slow) or "qwen" (cloud, cheap, fast)
 EMBEDDING_PROVIDER = "ollama"  # Default to local Ollama
+EMBEDDING_ENABLED = False  # Master toggle: enable/disable vectorization at all
 QWEN_EMBED_MODEL = "qwen/qwen3-embedding-8b"
 QWEN_EMBED_API_URL = "https://polza.ai/api/v1"  # Same as Polza API
 QWEN_EMBED_API_KEY = ""  # Loaded from POLZA_API_KEY in .env
@@ -84,6 +86,7 @@ _provider_state = {
     "openrouter_model": OPENROUTER_MODEL,
     "rag_chat_model": RAG_CHAT_MODEL,
     "embedding_provider": EMBEDDING_PROVIDER,  # "ollama" or "qwen"
+    "embedding_enabled": EMBEDDING_ENABLED,  # Master toggle for vectorization
 }
 
 
@@ -146,6 +149,12 @@ def _persist_provider_to_env():
             text = _re.sub(r"^EMBEDDING_PROVIDER=.*$", f"EMBEDDING_PROVIDER={emb_provider}", text, flags=_re.MULTILINE)
         else:
             text += f"\nEMBEDDING_PROVIDER={emb_provider}\n"
+        
+        emb_enabled = "true" if _provider_state.get("embedding_enabled", EMBEDDING_ENABLED) else "false"
+        if "EMBEDDING_ENABLED=" in text:
+            text = _re.sub(r"^EMBEDDING_ENABLED=.*$", f"EMBEDDING_ENABLED={emb_enabled}", text, flags=_re.MULTILINE)
+        else:
+            text += f"\nEMBEDDING_ENABLED={emb_enabled}\n"
             
         env_path.write_text(text, encoding="utf-8")
         # Also update runtime config

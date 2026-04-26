@@ -7,6 +7,7 @@ from config import (
     get_session, Generation, _resolve_token_for_gen, _headers,
     _provider_state, OLLAMA_TIMEOUT, POLZA_API,
     gen_summary_get_or_none, gen_summary_get_many, gen_summary_upsert,
+    gen_summary_mark_vectorized,
     get_analysis_state, update_analysis_state, get_analysis_counts,
 )
 import requests as http_requests
@@ -66,6 +67,8 @@ def _analyze_single_gen(gen_id: str) -> dict:
 
         llm_result = [None, None]
         embed_result = [None]
+        # WAVE-2: Check if vectorization is enabled
+        embedding_enabled = _provider_state.get("embedding_enabled", False)
 
         def _run_llm():
             llm_result[0], llm_result[1] = _llm_call_summarize(total_text)
@@ -75,9 +78,16 @@ def _analyze_single_gen(gen_id: str) -> dict:
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             llm_future = pool.submit(_run_llm)
-            embed_future = pool.submit(_run_embed)
             llm_future.result(timeout=OLLAMA_TIMEOUT if _provider_state["provider"] == "ollama" else 45)
-            embed_future.result(timeout=30)
+            
+            # Only run embedding if enabled in settings
+            if embedding_enabled:
+                embed_future = pool.submit(_run_embed)
+                try:
+                    embed_future.result(timeout=30)
+                except Exception as e:
+                    print(f"[AnalyzeAll][embed] non-fatal: {e}")
+                    embed_result[0] = None
 
         parsed, usage = llm_result
 
@@ -113,7 +123,12 @@ def _analyze_single_gen(gen_id: str) -> dict:
                 analysis=parsed,
                 user_text_snippet=total_text,
             )
-            _qdrant_upsert(gen_id, embed_result[0], qdrant_payload)
+            ok = _qdrant_upsert(gen_id, embed_result[0], qdrant_payload)
+            if ok:
+                try:
+                    gen_summary_mark_vectorized(gen_id, True)
+                except Exception as e:
+                    print(f"[AnalyzeAll][mark_vectorized] non-fatal: {e}")
 
         return {"status": "ok"}
     except Exception as e:

@@ -39,6 +39,7 @@ def api_provider_config():
         },
         "embedding": {
             "provider": _provider_state.get("embedding_provider", "ollama"),
+            "enabled": _provider_state.get("embedding_enabled", False),
             "providers": [
                 {"id": "ollama", "label": "Ollama (Local, Free, Slow)", "info": "nomic-embed-text-v2-moe, ~1s/request"},
                 {"id": "qwen", "label": "Qwen 3 Embedding 8B (Cloud, $0.0088/M, Fast)", "info": "0.88 РУБ/1M tokens, ~100ms/request"},
@@ -100,6 +101,11 @@ def api_provider_set():
             _config.EMBEDDING_PROVIDER = provider
             # No need to reimport — lazy dispatch in embeddings/__init__.py picks up change automatically
             print(f"[Provider] embedding provider switched to {provider}")
+    if "embeddingEnabled" in data:
+        enabled = bool(data["embeddingEnabled"])
+        _provider_state["embedding_enabled"] = enabled
+        _config.EMBEDDING_ENABLED = enabled
+        print(f"[Provider] embedding {'ENABLED' if enabled else 'DISABLED'}")
     
     if data.get("saveDefault") or data.get("saveEmbeddingDefault") or data.get("saveRagChatDefault") or "saveDefault" in data:
         _persist_provider_to_env()
@@ -112,4 +118,5 @@ def api_provider_set():
         "openrouterModel": _provider_state.get("openrouter_model", OPENROUTER_MODEL),
         "ragChatModel": _provider_state.get("rag_chat_model", _config.RAG_CHAT_MODEL),
         "embeddingProvider": _provider_state.get("embedding_provider", "ollama"),
+        "embeddingEnabled": _provider_state.get("embedding_enabled", False),
     })

@@ -92,6 +92,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   initTheme();
   loadBalance();
   loadProviderConfig();
+  // Show current vectorization stats on load
+  setTimeout(() => { if (typeof pollVectorizeStatus === 'function') pollVectorizeStatus(); }, 500);
 
   try {
     const c = await (await fetch('/api/config')).json();
@@ -188,7 +190,7 @@ async function loadProviderConfig() {
       }
     }
 
-    // 2. Embedding provider dropdown
+    // 2. Embedding provider dropdown + toggle
     const embDd = document.getElementById('embeddingDropdown');
     if (embDd && cfg.embedding) {
       embDd.value = cfg.embedding.provider;
@@ -197,6 +199,13 @@ async function loadProviderConfig() {
         const sel = embDd.options[embDd.selectedIndex];
         embInfo.textContent = sel ? sel.textContent.replace(/^[^\s]+ /, '') : '';
       }
+    }
+    // Embedding enabled toggle
+    const embToggle = document.getElementById('embeddingEnabledSwitch');
+    const embToggleLabel = document.getElementById('embeddingEnabledLabel');
+    if (embToggle && cfg.embedding) {
+      embToggle.checked = !!cfg.embedding.enabled;
+      if (embToggleLabel) embToggleLabel.textContent = cfg.embedding.enabled ? 'Вкл' : 'Выкл';
     }
 
     // 3. RAG Chat model dropdown
@@ -286,6 +295,81 @@ async function setEmbeddingProvider(provider) {
       info.textContent = '✅ ' + (sel ? sel.textContent.replace(/^[^\s]+ /, '') : provider);
     }
   } catch(e) { console.warn('Embedding switch failed:', e); }
+}
+
+// ─── Vectorize existing summaries ────────────────────────────────────────────
+let _vectorizePollTimer = null;
+
+async function startVectorizeExisting() {
+  if (!confirm('Запустить векторизацию существующих AI-саммари? Это может занять несколько минут.')) return;
+  const btn = document.getElementById('btnVectorizeExisting');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/vectorize-existing/start', {method: 'POST'});
+    const data = await r.json();
+    if (data.error) {
+      alert('Ошибка: ' + data.error);
+      if (btn) btn.disabled = false;
+      return;
+    }
+    pollVectorizeStatus();
+    _vectorizePollTimer = setInterval(pollVectorizeStatus, 3000);
+  } catch(e) { 
+    console.warn('vectorize start failed:', e);
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function pollVectorizeStatus() {
+  try {
+    const r = await fetch('/api/vectorize-existing/status');
+    const data = await r.json();
+    const status = document.getElementById('vectorizeStatus');
+    const btn = document.getElementById('btnVectorizeExisting');
+    if (!status) return;
+    
+    if (data.running) {
+      const pct = data.total > 0 ? Math.round(data.done / data.total * 100) : 0;
+      status.innerHTML = `⏳ ${data.done}/${data.total} (${pct}%) · err: ${data.errors}`;
+      status.style.color = 'var(--blue)';
+      if (btn) btn.disabled = true;
+    } else {
+      // Not running
+      if (data.unvectorizedCount > 0) {
+        status.innerHTML = `⚠️ Без вектора: <b>${data.unvectorizedCount}</b> из ${data.totalSummaryCount}`;
+        status.style.color = 'var(--text2)';
+      } else {
+        status.innerHTML = `✅ Все векторизовано (${data.vectorizedCount}/${data.totalSummaryCount})`;
+        status.style.color = 'var(--green)';
+      }
+      if (btn) btn.disabled = false;
+      // Stop polling
+      if (_vectorizePollTimer) {
+        clearInterval(_vectorizePollTimer);
+        _vectorizePollTimer = null;
+        // Refresh table to show new 🧬 icons
+        if (typeof prefetchSummaries === 'function') {
+          prefetchSummaries().then(() => renderTable());
+        }
+      }
+    }
+  } catch(e) { console.warn('vectorize status poll failed:', e); }
+}
+
+async function toggleEmbeddingEnabled() {
+  const checked = document.getElementById('embeddingEnabledSwitch').checked;
+  const label = document.getElementById('embeddingEnabledLabel');
+  try {
+    const r = await fetch('/api/provider/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({embeddingEnabled: checked}),
+    });
+    if (!r.ok) return;
+    if (S.providerConfig && S.providerConfig.embedding) S.providerConfig.embedding.enabled = checked;
+    if (label) label.textContent = checked ? 'Вкл' : 'Выкл';
+    console.log('[Embedding] enabled:', checked);
+  } catch(e) { console.warn('toggle embedding failed:', e); }
 }
 
 async function saveDefaultEmbedding() {
@@ -740,17 +824,20 @@ function renderAiCell(it) {
   }
   const isPersonal = sum.isWork === false;
   const flags = Array.isArray(sum.riskFlags) ? sum.riskFlags : [];
+  const isVectorized = sum.isVectorized === true;
+  const vecIcon = isVectorized ? '<span class="ai-cell-vec" title="Векторизовано в Qdrant">🧬</span>' : '';
   const flagIcons = [
-    isPersonal ? '⚠️' : '',
+    isPersonal ? '🏠' : '',
     flags.includes('personal') ? '👤' : '',
     flags.includes('sensitive') ? '🔒' : '',
-    flags.includes('high_cost') ? '💸' : '',
+    flags.includes('high_cost') ? '💰' : '',
   ].filter(Boolean).join('');
   const topic = sum.topic || 'Готово';
-  const tooltip = `${topic}\n\n${sum.summary || ''}`;
+  const tooltip = `${topic}${isVectorized ? ' · векторизовано' : ' · без вектора'}\n\n${sum.summary || ''}`;
   return `<span class="ai-cell ai-cell-done ${isPersonal ? 'ai-cell-personal' : ''}" title="${esc(tooltip)}">
-    ${flagIcons ? `<span class="ai-cell-flags">${flagIcons}</span>` : '<span class="ai-cell-icon">🧠</span>'}
+    ${flagIcons ? `<span class="ai-cell-flags">${flagIcons}</span>` : '<span class="ai-cell-icon">✅</span>'}
     <span class="ai-cell-topic">${esc(topic)}</span>
+    ${vecIcon}
   </span>`;
 }
 // ─── END_BLOCK_AI_CELL

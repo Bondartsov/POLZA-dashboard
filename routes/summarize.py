@@ -6,6 +6,7 @@ from config import (
     get_session, Generation, _resolve_token_for_gen, _headers, _provider_state,
     OLLAMA_CHAT_MODEL, OLLAMA_TIMEOUT, POLZA_API,
     gen_summary_get_or_none, gen_summary_get_many, gen_summary_upsert, gen_summary_delete,
+    gen_summary_mark_vectorized,
 )
 import requests as http_requests
 from providers.dispatcher import _llm_call_summarize
@@ -62,6 +63,7 @@ def api_generation_summarize():
 
         llm_result = [None, None]
         embed_result = [None]
+        embedding_enabled = _provider_state.get("embedding_enabled", False)
 
         def _run_llm():
             llm_result[0], llm_result[1] = _llm_call_summarize(total_text)
@@ -71,9 +73,16 @@ def api_generation_summarize():
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             llm_future = pool.submit(_run_llm)
-            embed_future = pool.submit(_run_embed)
             llm_future.result(timeout=OLLAMA_TIMEOUT if provider == "ollama" else 45)
-            embed_future.result(timeout=30)
+            
+            # Only run embedding if enabled in settings
+            if embedding_enabled:
+                embed_future = pool.submit(_run_embed)
+                try:
+                    embed_future.result(timeout=30)
+                except Exception as e:
+                    print(f"[GenSummarize][embed] non-fatal: {e}")
+                    embed_result[0] = None
 
         parsed, usage = llm_result
         print(
@@ -121,6 +130,11 @@ def api_generation_summarize():
                 user_text_snippet=total_text,
             )
             vector_stored = _qdrant_upsert(gen_id, embed_result[0], qdrant_payload)
+            if vector_stored:
+                try:
+                    gen_summary_mark_vectorized(gen_id, True)
+                except Exception as e:
+                    print(f"[GenSummarize][mark_vectorized] non-fatal: {e}")
         # END_BLOCK_GEN_VECTOR_STORE
 
         return jsonify({

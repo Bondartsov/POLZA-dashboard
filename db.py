@@ -12,7 +12,7 @@ END_MODULE_CONTRACT
 import json
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, String, Integer, Float, Boolean, DateTime, JSON, Index, Text
+from sqlalchemy import create_engine, Column, String, Integer, Float, Boolean, DateTime, JSON, Index, Text, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = os.environ.get(
@@ -184,6 +184,7 @@ class GenerationSummary(Base):
     cache_read_tokens = Column(Integer, default=0)
     input_tokens = Column(Integer, default=0)
     output_tokens = Column(Integer, default=0)
+    is_vectorized = Column(Boolean, default=False)  # WAVE-2: True if Qdrant vector exists
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -205,6 +206,7 @@ class GenerationSummary(Base):
             "cacheReadTokens": self.cache_read_tokens or 0,
             "inputTokens": self.input_tokens or 0,
             "outputTokens": self.output_tokens or 0,
+            "isVectorized": bool(self.is_vectorized),
             "createdAt": self.created_at.isoformat() if self.created_at else None,
             "updatedAt": self.updated_at.isoformat() if self.updated_at else None,
             "cached": True,
@@ -218,6 +220,16 @@ class GenerationSummary(Base):
 def init_db():
     """Create tables if not exist."""
     Base.metadata.create_all(engine)
+    # WAVE-2 migration: add is_vectorized column if missing
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("""
+                ALTER TABLE generation_summaries 
+                ADD COLUMN IF NOT EXISTS is_vectorized BOOLEAN DEFAULT FALSE
+            """))
+            conn.commit()
+    except Exception as e:
+        print(f"[init_db] migration warning: {e}")
 
 
 def get_session():
@@ -382,6 +394,21 @@ def gen_summary_delete(generation_id: str):
             GenerationSummary.generation_id == generation_id
         ).delete()
         s.commit()
+    finally:
+        s.close()
+
+
+def gen_summary_mark_vectorized(generation_id: str, vectorized: bool = True):
+    """Mark generation as vectorized (Qdrant vector exists) or not."""
+    s = get_session()
+    try:
+        s.query(GenerationSummary).filter(
+            GenerationSummary.generation_id == generation_id
+        ).update({"is_vectorized": vectorized})
+        s.commit()
+    except Exception as e:
+        s.rollback()
+        print(f"[GenSummaryStore][mark_vectorized] ERROR: {e}")
     finally:
         s.close()
 
