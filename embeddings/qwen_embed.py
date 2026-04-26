@@ -96,17 +96,17 @@ def _embed_text_qwen(
         return None
 
 
-def _extract_user_text_from_log_qwen(log_dict: dict, max_chars: int = 4000) -> str:
+def _extract_user_text_from_log_qwen(log_dict: dict, limit_chars: int = 4000) -> str:
     """
     Extract and concatenate user-role messages from Polza log.
     Same as for Ollama embedding (compatibility).
     
     Args:
         log_dict: Polza log structure
-        max_chars: Maximum characters to include
+        limit_chars: Maximum characters to include
         
     Returns:
-        Concatenated user text (capped at max_chars)
+        Concatenated user text (capped at limit_chars)
     """
     if not log_dict or not isinstance(log_dict, dict):
         return ""
@@ -124,7 +124,7 @@ def _extract_user_text_from_log_qwen(log_dict: dict, max_chars: int = 4000) -> s
             user_texts.append(content)
     
     result = "\n".join(user_texts)
-    if len(result) > max_chars:
-        result = result[:max_chars]
+    if len(result) > limit_chars:
+        result = result[:limit_chars]
     
     return result

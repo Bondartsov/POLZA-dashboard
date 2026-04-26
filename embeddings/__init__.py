@@ -29,7 +29,7 @@ def _embed_text(text: str):
         return _embed_ollama(text)
 
 
-def _extract_user_text_from_log(log_dict: dict, max_chars: int = 4000) -> str:
+def _extract_user_text_from_log(log_dict: dict, limit_chars: int = 4000) -> str:
     """Extract user text from log (same logic for both providers)."""
     from embeddings.embed import _extract_user_text_from_log as _extract
-    return _extract(log_dict, max_chars)
+    return _extract(log_dict, limit_chars=limit_chars)
