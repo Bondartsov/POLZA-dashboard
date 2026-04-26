@@ -369,14 +369,6 @@ function getProviderEstimate() {
   if (S.provider === 'openrouter') return '5-15s';
   return '2-3s';
 }
-  return 'Haiku · ~$0.002';
-}
-
-function getProviderEstimate() {
-  if (S.provider === 'ollama') return '~5-10 сек';
-  if (S.provider === 'openrouter') return '~5-15 сек';
-  return '~2-3 сек';
-}
 
 function renderKeyList() {
   const el = document.getElementById('keyList');
