@@ -1,7 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- GRACE Knowledge Graph — Polza.AI Dashboard -->
-<!-- VERSION: 5.1.0 -->
+<!-- VERSION: 5.2.0 -->
 <!-- CHANGELOG:
+       5.2.0 (2026-04-26): Phase-7 "Embedding Provider Selection + Vectorization Toggle" — Wave-3.
+                           New module: M-QWEN-EMBED (Qwen 3 Embedding 8B via Polza API).
+                           New module: M-VECTORIZE-EXISTING (embedding-only worker for existing summaries).
+                           Lazy dispatch in embeddings/__init__.py — runtime provider switching.
+                           DB schema: added is_vectorized column to generation_summaries.
+                           UI sidebar refactor: 3 dropdowns (LLM / Embedding / RAG Chat) + per-section "Default" buttons.
+                           Embedding On/Off toggle, "Vectorize Existing" button.
+                           Frontend: 🧬 icon shows vectorized records in table.
+                           Bug fixes: 📌 stacking, parameter name limit_chars, HTTP 400/404 stall, 
+                           direct embed import in workers/routes (now use dispatcher).
        5.1.0 (2026-04-26): Phase-7 "Hardening & Refactoring" — RAG security hardening + modular refactoring (Wave-2).
                            New modules: M-RAG-RETRIEVER (QueryClassifier, 4-mode dispatcher),
                            M-RAG-CONTEXT-BUILDER (strategy pattern context formatting),
@@ -57,7 +67,7 @@
        3.1.0: Session summaries, 95-chunk SocratiCode index.
 -->
 
-<KnowledgeGraph project="polza-dashboard" version="5.1.0">
+<KnowledgeGraph project="polza-dashboard" version="5.2.0">
 
   <M-APP NAME="Flask App Entrypoint" TYPE="ENTRY_POINT">
     <purpose>Minimal entrypoint: creates Flask app from config, registers all route blueprints, starts background workers, runs server. Only contains main() function.</purpose>
@@ -565,6 +575,71 @@
       <documented-limitation PURPOSE="Known bypasses: synonym injections ('disregard' vs 'ignore'), Unicode lookalikes (𝐟𝐨𝐫𝐠𝐞𝐭), Cyrillic mix. Recommend multi-stage detection (semantic + LLM)." />
     </annotations>
   </M-RAG-GUARDRAILS>
+
+  <!-- ═══ PHASE-7 WAVE-3: Embedding Provider Selection + Vectorization Toggle ═══ -->
+
+  <M-QWEN-EMBED NAME="Qwen 3 Embedding Provider" TYPE="INTEGRATION">
+    <purpose>Cloud-based embeddings via Qwen 3 Embedding 8B through Polza API. 10x faster than Ollama (~100ms vs ~1s), cheap (0.88 RUB/1M tokens), Matryoshka truncation to 768-dim for Qdrant compatibility.</purpose>
+    <path>embeddings/qwen_embed.py</path>
+    <depends>requests, config (QWEN_EMBED_API_URL, POLZA_API_KEY)</depends>
+    <annotations>
+      <fn-embed_text_qwen PURPOSE="POST to Polza API /embeddings endpoint with model='qwen/qwen3-embedding-8b' and dimensions=768 for Qdrant compatibility (native is 4096-dim)" />
+      <fn-extract_user_text_from_log_qwen PURPOSE="Same logic as Ollama version (compatibility)" />
+      <feature-matryoshka_truncation PURPOSE="dimensions=768 parameter — Matryoshka Representation Learning truncates 4096-dim to 768-dim while preserving semantic quality" />
+      <feature-error_handling PURPOSE="Specific exceptions: Timeout, ConnectionError, HTTPError, JSON parse errors. All return None instead of raising." />
+      <constraint-api_key PURPOSE="Uses POLZA_API_KEY from os.environ (not config.AUTH_TOKEN). Same key as for LLM access." />
+    </annotations>
+  </M-QWEN-EMBED>
+
+  <M-EMBEDDINGS-DISPATCHER NAME="Embeddings Lazy Dispatcher" TYPE="INTEGRATION">
+    <purpose>Lazy dispatch of embedding provider — checks _provider_state.embedding_provider on EVERY call. Enables runtime switching between Ollama and Qwen without restart.</purpose>
+    <path>embeddings/__init__.py</path>
+    <depends>config._provider_state, embeddings.embed (Ollama), embeddings.qwen_embed (Qwen)</depends>
+    <annotations>
+      <fn-_embed_text PURPOSE="Dispatcher: checks provider on each call, routes to Ollama or Qwen embedder. Required for live provider switching in long-running workers." />
+      <fn-_extract_user_text_from_log PURPOSE="Common helper (extracts user-role messages from Polza log, capped at limit_chars)" />
+      <constraint-runtime_switching PURPOSE="WAVE-3 FIX: Without lazy dispatch, workers cached the embed function from import-time provider. Now switches in real-time." />
+    </annotations>
+  </M-EMBEDDINGS-DISPATCHER>
+
+  <M-VECTORIZE-EXISTING NAME="Vectorize Existing Worker" TYPE="CORE_LOGIC">
+    <purpose>Background worker that vectorizes only existing generation_summaries that lack Qdrant vectors (is_vectorized=FALSE). Skips LLM analysis — only does embedding + Qdrant upsert.</purpose>
+    <path>workers/vectorize_existing.py</path>
+    <depends>embeddings dispatcher, Qdrant, GenerationSummary, gen_summary_mark_vectorized</depends>
+    <annotations>
+      <fn-_vectorize_single_gen PURPOSE="Per-record: fetch log → extract text → embed via dispatcher → Qdrant upsert → mark is_vectorized=TRUE" />
+      <fn-_vectorize_worker PURPOSE="Background thread: query unvectorized records, parallel pool (3 workers), progress tracking" />
+      <fn-start_vectorize_existing PURPOSE="Public: start worker, returns state. Validates embedding_enabled flag." />
+      <fn-stop_vectorize_existing PURPOSE="Public: request graceful stop" />
+      <fn-get_vectorize_state PURPOSE="Public: return current progress (running, total, done, errors, skipped)" />
+      <constraint-embedding_required PURPOSE="API endpoint /api/vectorize-existing/start returns 400 if embedding_enabled=False" />
+    </annotations>
+  </M-VECTORIZE-EXISTING>
+
+  <M-EMBEDDING-TOGGLE NAME="Embedding On/Off Master Toggle" TYPE="INFRASTRUCTURE">
+    <purpose>Master toggle for vectorization across the app. When OFF (default), Analyze-All and Summarize skip embedding step entirely. Persists to .env via EMBEDDING_ENABLED.</purpose>
+    <path>config.py (_provider_state.embedding_enabled), routes/provider.py</path>
+    <depends>_provider_state, _persist_provider_to_env</depends>
+    <annotations>
+      <field-embedding_enabled PURPOSE="Boolean flag in _provider_state. Default False (loaded from EMBEDDING_ENABLED env var). Saved to .env on Default button click." />
+      <api-set PURPOSE="POST /api/provider/set with embeddingEnabled: bool — runtime toggle without restart" />
+      <api-config PURPOSE="GET /api/provider/config returns embedding.enabled state" />
+      <integration-analyze_all PURPOSE="workers/analyze_all.py checks _provider_state.embedding_enabled before submitting embed task to ThreadPoolExecutor" />
+      <integration-summarize PURPOSE="routes/summarize.py same check — single-record summarize respects toggle" />
+    </annotations>
+  </M-EMBEDDING-TOGGLE>
+
+  <M-DB-VECTORIZED-FLAG NAME="Vectorization Status Flag" TYPE="DATA_LAYER">
+    <purpose>is_vectorized BOOLEAN column in generation_summaries — tracks which records have a corresponding Qdrant vector. Auto-migration in init_db (ADD COLUMN IF NOT EXISTS).</purpose>
+    <path>db.py (GenerationSummary model + gen_summary_mark_vectorized helper)</path>
+    <depends>GenerationSummary, engine</depends>
+    <annotations>
+      <field-is_vectorized PURPOSE="Boolean column, default FALSE. Set TRUE after successful Qdrant upsert." />
+      <fn-gen_summary_mark_vectorized PURPOSE="Helper: UPDATE generation_summaries SET is_vectorized=:val WHERE generation_id=:id" />
+      <field-isVectorized PURPOSE="Exported to API as 'isVectorized' in to_dict() — used by frontend for 🧬 icon" />
+      <migration-auto PURPOSE="init_db runs ALTER TABLE ADD COLUMN IF NOT EXISTS — safe to run on existing DB" />
+    </annotations>
+  </M-DB-VECTORIZED-FLAG>
 
    <Constraints>
     <constraint-sort>Polza.AI API supports only sortBy=createdAt|clientCost; DB supports all columns</constraint-sort>

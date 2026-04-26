@@ -1,6 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<DevelopmentPlan VERSION="1.2.0">
+<DevelopmentPlan VERSION="1.3.0">
   <!-- CHANGELOG:
+         1.3.0 (2026-04-26): Phase-7 Wave-3 "Embedding Provider + Vectorization Toggle".
+                             New modules: M-QWEN-EMBED (Qwen 3 Embedding 8B via Polza API, dimensions=768),
+                             M-EMBEDDINGS-DISPATCHER (lazy runtime provider switching),
+                             M-VECTORIZE-EXISTING (embedding-only batch worker for existing summaries),
+                             M-EMBEDDING-TOGGLE (master on/off toggle), M-DB-VECTORIZED-FLAG (is_vectorized column).
+                             UI: 3 sidebar dropdowns (LLM/Embedding/RAG Chat) + per-section Default buttons,
+                             On/Off toggle for embedding, "Vectorize Existing" button, 🧬 icon for vectorized records.
+                             API endpoints: /api/vectorize-existing/start, /stop, /status.
+                             DB migration: added is_vectorized BOOLEAN column to generation_summaries.
+                             Qdrant: cleared old 6686 vectors (mixed Ollama+Qwen would corrupt cosine similarity),
+                             reset all is_vectorized=FALSE for clean rebuild.
+                             Bug fixes: 📌 button stacking, _extract_user_text_from_log limit_chars param,
+                             HTTP 400/404 stall in Analyze-All (now creates empty placeholder),
+                             direct embeddings.embed import in workers/routes (now use dispatcher).
          1.2.0 (2026-04-26): Phase-7 "Hardening & Refactoring" — Security + modularity.
                              Wave-2: M-RAG-RETRIEVER (QueryMode, QueryClassifier with word-boundaries),
                              M-RAG-CONTEXT-BUILDER (strategy pattern, ORM parameterized queries),
@@ -800,6 +814,23 @@
        <step-5 module="M-RAG-CHAT" status="updated" verification="V-M-RAG-CHAT">Updated rag/chat.py: removed inline guardrails, import from rag.guardrails. Added logging for injection attempts. Maintained all streaming/SSE functionality.</step-5>
        <step-6 status="done">Testing: 55 unit tests (QueryClassifier 16, Guardrails 19, ContextBuilder 10, Integration 10) + 25 adversarial tests (injection variants, keyword stuffing, edge cases, performance). All PASSED. Limitations documented (synonym bypasses, Unicode obfuscation, NER TODO).</step-6>
      </Phase-7>
+
+     <Phase-7-Wave-3 name="Embedding Provider Selection + Vectorization Toggle" status="done">
+       <goal>Phase-7 Wave-3: Add Qwen 3 Embedding 8B as cloud alternative to Ollama (10x faster, 0.88 RUB/1M tokens), runtime-switchable via UI dropdown. Implement embedding On/Off master toggle, separate "vectorize existing" worker for re-indexing without LLM cost, vectorization status icon in UI table, persistence to .env.</goal>
+       <notes>
+         <note-1>Cleared Qdrant collection (6686 mixed Ollama vectors) to avoid corrupted cosine similarity when mixing providers. All is_vectorized flags reset to FALSE for clean rebuild.</note-1>
+         <note-2>Lazy dispatch in embeddings/__init__.py — checks _provider_state.embedding_provider on EVERY call. Critical for runtime switching in long-running workers.</note-2>
+         <note-3>Qwen native = 4096-dim, but supports Matryoshka truncation via dimensions=768 parameter. Compatible with existing Qdrant collection (768-dim cosine).</note-3>
+         <note-4>Embedding now defaults to OFF (EMBEDDING_ENABLED=false). LLM analysis runs without embedding unless explicitly enabled. Saves API costs during normal operation.</note-4>
+       </notes>
+       <step-1 module="M-QWEN-EMBED" status="done">New embeddings/qwen_embed.py: _embed_text_qwen() with dimensions=768 truncation, OpenAI-compatible response parsing, specific error handling (Timeout, ConnectionError, HTTPError).</step-1>
+       <step-2 module="M-EMBEDDINGS-DISPATCHER" status="done">Refactored embeddings/__init__.py to use lazy dispatch: _embed_text checks _provider_state.embedding_provider on each call. Workers and routes now import from package, not from concrete provider module.</step-2>
+       <step-3 module="M-EMBEDDING-TOGGLE" status="done">New _provider_state.embedding_enabled flag. analyze_all and summarize check flag before submitting embed task. /api/provider/set accepts embeddingEnabled bool. Persisted to .env via _persist_provider_to_env.</step-3>
+       <step-4 module="M-DB-VECTORIZED-FLAG" status="done">Added is_vectorized BOOLEAN column to generation_summaries (auto-migration in init_db). New helper gen_summary_mark_vectorized(gen_id, bool). Exported as 'isVectorized' in API responses.</step-4>
+       <step-5 module="M-VECTORIZE-EXISTING" status="done">New workers/vectorize_existing.py: queries unvectorized records, embeds via dispatcher (no LLM!), Qdrant upsert, marks is_vectorized=TRUE. Background thread, 3-worker pool, progress tracking. API: /api/vectorize-existing/start /stop /status.</step-5>
+       <step-6 module="M-STATIC" status="updated">Sidebar redesign: 3 dropdowns (LLM/Embedding/RAG Chat) replaced radio buttons. Per-section "📌 По умолчанию" buttons. Embedding On/Off toggle. "🧬 Векторизовать существующие" button with live progress. 🧬 icon in AI cell for vectorized records. Status auto-loads on page open.</step-6>
+       <step-7 status="done">Bug fixes: 📌 button stacking (replace marker via regex), _extract_user_text_from_log limit_chars param mismatch, HTTP 400/404 stall in Analyze-All (creates empty placeholder summary), direct embeddings.embed import in workers/routes (now uses lazy dispatcher).</step-7>
+     </Phase-7-Wave-3>
 
    </ImplementationOrder>
 
