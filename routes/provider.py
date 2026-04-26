@@ -100,7 +100,11 @@ def api_provider_set():
             _config.EMBEDDING_PROVIDER = provider
             # No need to reimport — lazy dispatch in embeddings/__init__.py picks up change automatically
             print(f"[Provider] embedding provider switched to {provider}")
-    _persist_provider_to_env()
+    
+    if data.get("saveDefault") or data.get("saveEmbeddingDefault") or data.get("saveRagChatDefault") or "saveDefault" in data:
+        _persist_provider_to_env()
+        print("[Provider] Persisted settings to .env")
+        
     return jsonify({
         "ok": True,
         "provider": _provider_state["provider"],

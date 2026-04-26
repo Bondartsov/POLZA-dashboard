@@ -128,18 +128,25 @@ def _persist_provider_to_env():
         model = _provider_state.get("openrouter_model", OPENROUTER_MODEL)
         import re as _re
         if "LLM_PROVIDER=" in text:
-            text = _re.sub(r"^LLM_PROVIDER=.*$", f"LLM_PROVIDER={provider}", text, flags=re.MULTILINE)
+            text = _re.sub(r"^LLM_PROVIDER=.*$", f"LLM_PROVIDER={provider}", text, flags=_re.MULTILINE)
         else:
             text += f"\nLLM_PROVIDER={provider}\n"
         if "OPENROUTER_MODEL=" in text:
-            text = _re.sub(r"^OPENROUTER_MODEL=.*$", f"OPENROUTER_MODEL={model}", text, flags=re.MULTILINE)
+            text = _re.sub(r"^OPENROUTER_MODEL=.*$", f"OPENROUTER_MODEL={model}", text, flags=_re.MULTILINE)
         else:
             text += f"\nOPENROUTER_MODEL={model}\n"
         rag_chat_model = _provider_state.get("rag_chat_model", RAG_CHAT_MODEL)
         if "RAG_CHAT_MODEL=" in text:
-            text = _re.sub(r"^RAG_CHAT_MODEL=.*$", f"RAG_CHAT_MODEL={rag_chat_model}", text, flags=re.MULTILINE)
+            text = _re.sub(r"^RAG_CHAT_MODEL=.*$", f"RAG_CHAT_MODEL={rag_chat_model}", text, flags=_re.MULTILINE)
         else:
             text += f"\nRAG_CHAT_MODEL={rag_chat_model}\n"
+            
+        emb_provider = _provider_state.get("embedding_provider", EMBEDDING_PROVIDER)
+        if "EMBEDDING_PROVIDER=" in text:
+            text = _re.sub(r"^EMBEDDING_PROVIDER=.*$", f"EMBEDDING_PROVIDER={emb_provider}", text, flags=_re.MULTILINE)
+        else:
+            text += f"\nEMBEDDING_PROVIDER={emb_provider}\n"
+            
         env_path.write_text(text, encoding="utf-8")
         # Also update runtime config
         RAG_CHAT_MODEL = rag_chat_model
