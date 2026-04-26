@@ -9,7 +9,7 @@ from config import (
 )
 import requests as http_requests
 from providers.dispatcher import _llm_call_summarize
-from embeddings.embed import _embed_text, _extract_user_text_from_log
+from embeddings import _embed_text, _extract_user_text_from_log
 from embeddings.qdrant import _qdrant_upsert
 from embeddings.payload import _build_qdrant_payload
 
