@@ -30,6 +30,9 @@
                     <button class="chat-btn-close" onclick="window._chatToggle()" title="Закрыть">✕</button>
                 </div>
             </div>
+            <div class="chat-status-bar" id="chatStatusBar" style="display:none; padding:8px 12px; background:#f0f4f8; border-bottom:1px solid #ddd; font-size:12px; color:#666;">
+                <div id="chatStatusText">Инициализация...</div>
+            </div>
             <div class="chat-messages" id="chatMessages">
                 <div class="chat-empty" id="chatEmpty">
                     <div class="chat-empty-icon">💬</div>
@@ -67,6 +70,10 @@
 
         // Create session
         createSession();
+        
+        // Load RAG status initially and periodically
+        updateRagStatus();
+        setInterval(updateRagStatus, 5000);  // Update every 5 seconds
     }
 
     function addTopbarButton() {
@@ -101,6 +108,37 @@
         }
     }
 
+    // --- RAG Status ---
+    async function updateRagStatus() {
+        try {
+            const r = await fetch("/api/chat/status");
+            const status = await r.json();
+            const statusBar = document.getElementById("chatStatusBar");
+            const statusText = document.getElementById("chatStatusText");
+            
+            if (!statusBar) return;
+            
+            const { vectorized, total, percent, ready } = status;
+            
+            if (!ready && total > 0) {
+                // Not ready yet - show progress
+                statusBar.style.display = "block";
+                statusText.innerHTML = `🧬 RAG подготавливается: <strong>${vectorized}/${total}</strong> векторов (${percent}%)`;
+                if (percent >= 50) {
+                    statusText.innerHTML += ' <em style="color:#888">(доступен через ~2-3 мин)</em>';
+                }
+            } else if (ready) {
+                // Ready for search
+                statusBar.style.display = "none";
+            } else {
+                // Initial state
+                statusBar.style.display = "none";
+            }
+        } catch (e) {
+            console.warn("[ChatUI] status fetch failed:", e);
+        }
+    }
+
     // --- Toggle ---
     window._chatToggle = function() {
         if (!panelEl) return;
@@ -129,6 +167,7 @@
                 </div>`;
         }
         await createSession();
+        updateRagStatus();  // Show status when new chat created
     };
 
     // --- Suggest ---

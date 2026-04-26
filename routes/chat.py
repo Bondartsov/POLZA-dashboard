@@ -51,21 +51,46 @@ def api_chat_new():
 
 @chat_bp.route("/api/chat/status", methods=["GET"])
 def api_chat_status():
-    """Return RAG chat status: vector count, model info, availability."""
-    vectors = 0
+    """Return RAG chat status: vector count, model info, availability, vectorization progress."""
+    from config import get_session
+    from db import GenerationSummary
+    
+    vectors_in_qdrant = 0
     qdrant_ok = False
+    vectorized_count = 0
+    total_summaries = 0
+    
+    # Get Qdrant status
     try:
         client = _get_qdrant_client()
         if client:
             info = client.get_collection(QDRANT_COLLECTION)
-            vectors = getattr(info, "points_count", 0) or 0
+            vectors_in_qdrant = getattr(info, "points_count", 0) or 0
             qdrant_ok = True
     except Exception:
         pass
+    
+    # Get vectorization progress from DB
+    try:
+        s = get_session()
+        total_summaries = s.query(GenerationSummary).count()
+        vectorized_count = s.query(GenerationSummary).filter(
+            GenerationSummary.is_vectorized == True
+        ).count()
+        s.close()
+    except Exception:
+        pass
+    
+    percent = (vectorized_count * 100 // total_summaries) if total_summaries else 0
+    # RAG is "ready" when at least 50% vectorized
+    rag_ready = qdrant_ok and vectors_in_qdrant > 0 and percent >= 50
 
     return jsonify({
-        "vectors": vectors,
+        "vectorized": vectorized_count,
+        "total": total_summaries,
+        "percent": percent,
+        "vectorsInQdrant": vectors_in_qdrant,
         "model": _get_chat_model(),
         "qdrant_ok": qdrant_ok,
-        "available": qdrant_ok and vectors > 0,
+        "ready": rag_ready,
     })
