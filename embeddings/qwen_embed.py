@@ -72,11 +72,18 @@ def _embed_text_qwen(
         if "data" in data and len(data["data"]) > 0:
             embedding = data["data"][0].get("embedding")
             if embedding:
+                if len(embedding) != 768:
+                    logger.error(f"Qwen embedding size mismatch: got {len(embedding)}, expected 768")
+                    return None
                 return embedding
         
         # Handle direct embedding in response
         if "embedding" in data:
-            return data["embedding"]
+            embedding = data["embedding"]
+            if len(embedding) != 768:
+                logger.error(f"Qwen embedding size mismatch: got {len(embedding)}, expected 768")
+                return None
+            return embedding
         
         logger.error(f"Unexpected response format from Qwen API: {data}")
         return None
