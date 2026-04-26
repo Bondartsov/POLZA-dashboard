@@ -27,96 +27,74 @@
     </div>
     <div class="parsed-info" id="parsedInfo"></div>
   </div>
-  <div class="sidebar-section">
-    <h3>⚙ Настройки</h3>
-    <div class="provider-toggle">
-      <h4>🧠 AI Провайдер</h4>
-      <label class="provider-option">
-        <input type="radio" name="provider" value="ollama" onchange="setProvider('ollama')" checked>
-        <span class="provider-label">
-          <span class="provider-icon">🏠</span> On-Prem
-          <span class="provider-info" id="providerOllamaInfo">Qwen 3.5 · $0.00</span>
-        </span>
-      </label>
-      <label class="provider-option">
-        <input type="radio" name="provider" value="anthropic" onchange="setProvider('anthropic')">
-        <span class="provider-label">
-          <span class="provider-icon">☁️</span> Cloud
-          <span class="provider-info" id="providerAnthropicInfo">Haiku 4.5 · ~$0.002</span>
-        </span>
-      </label>
-      <label class="provider-option">
-        <input type="radio" name="provider" value="openrouter" onchange="setProvider('openrouter')">
-        <span class="provider-label">
-          <span class="provider-icon">🌐</span> Cloud Free
-          <span class="provider-info" id="providerOpenRouterInfo">$0.00</span>
-        </span>
-      </label>
-      <div id="openrouterModelSelect" style="display:none;margin:-2px 0 4px 28px;">
-        <select id="orModelDropdown" onchange="setOpenRouterModel(this.value)" style="width:100%;padding:3px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text1);">
-          <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 Super 120B</option>
-          <option value="google/gemma-4-31b-it:free">Gemma 4 31B</option>
-        </select>
-      </div>
-      <div id="ragChatModelSelect" style="margin:6px 0 4px 0;">
-        <div style="font-size:10px;color:var(--text3);margin-bottom:2px;">💬 Модель RAG-чата</div>
-        <select id="ragChatModelDropdown" onchange="setRagChatModel(this.value)" style="width:100%;padding:3px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text1);">
-          <option value="nvidia/nemotron-3-nano-30b-a3b:free">Nemotron 3 Nano 30B (fast)</option>
-          <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 Super 120B</option>
-          <option value="google/gemma-4-31b-it:free">Gemma 4 31B</option>
-        </select>
-      </div>
-      <label class="auto-analyze-toggle" style="margin-top:4px">
-        <input type="checkbox" id="defaultProviderSwitch" onchange="setDefaultProvider()">
-        <span>📌 По умолчанию</span>
-        <span id="defaultProviderBadge" style="font-size:9px;color:var(--text3);margin-left:2px"></span>
-      </label>
-      <label class="auto-analyze-toggle" style="margin-top:2px">
-        <input type="checkbox" id="autoAnalyzeSwitch" onchange="toggleAutoAnalyze()">
-        <span>🤖 Авто-анализ новых</span>
-      </label>
-      <div style="font-size:10px;color:var(--text2);margin-top:2px;padding-left:4px">
-        Sync с Polza.AI каждые 5 мин · анализ при включении
-      </div>
-    </div>
-    <div class="embedding-toggle" style="margin-top:8px">
-      <h4 style="font-size:12px;margin-bottom:4px">📊 Векторизация</h4>
-      <label class="provider-option">
-        <input type="radio" name="embedding" value="ollama" onchange="setEmbeddingProvider('ollama')" checked>
-        <span class="provider-label">
-          <span class="provider-icon">🏠</span> Ollama Local
-          <span class="provider-info" style="font-size:9px;color:var(--text3)">nomic · free · ~1s</span>
-        </span>
-      </label>
-      <label class="provider-option">
-        <input type="radio" name="embedding" value="qwen" onchange="setEmbeddingProvider('qwen')">
-        <span class="provider-label">
-          <span class="provider-icon">⚡</span> Qwen 3 Embed
-          <span class="provider-info" style="font-size:9px;color:var(--text3)">8B · 0.88₽/M · ~100ms</span>
-        </span>
-      </label>
-      <div id="embeddingStatus" style="font-size:9px;color:var(--text3);margin-top:2px;padding-left:4px"></div>
-    </div>
-    <div class="theme-toggle">
-      <input type="checkbox" id="themeSwitch" onchange="toggleTheme()">
-      <span>Светлая тема</span>
-    </div>
-    <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-bottom:6px">
-      <input type="checkbox" id="setAutoRefresh" onchange="toggleAutoRefresh()" checked>
-      Автообновление
-      <select id="setRefreshInterval" onchange="applyRefreshInterval()" style="font-size:11px;padding:1px 4px;border-radius:3px">
-        <option value="10">10 сек</option>
-        <option value="30">30 сек</option>
-        <option value="60" selected>60 сек</option>
-        <option value="120">2 мин</option>
-        <option value="300">5 мин</option>
-      </select>
-    </label>
-    <label style="font-size:12px">Записей на странице
-      <input type="number" id="setLimit" value="50" min="10" max="500" step="10" onchange="S.limit=+this.value;goPage(1)">
-    </label>
-  </div>
-  <div class="sidebar-section">
+   <div class="sidebar-section">
+     <h3>⚙ Настройки ИИ</h3>
+
+     <!-- 1. ИИ для анализа запросов -->
+     <div class="ai-section" style="margin-bottom:10px">
+       <div style="font-size:11px;color:var(--text2);margin-bottom:3px;font-weight:600">🧠 Анализ запросов</div>
+       <select id="llmProviderDropdown" onchange="setLLMProvider(this.value)" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text1)">
+         <option value="ollama">🏠 Ollama On-Prem (Qwen 3.5 · free)</option>
+         <option value="anthropic">☁️ Anthropic Cloud (Haiku 4.5 · ~$0.002)</option>
+         <option value="openrouter-or-nemotron-super">🌐 Nemotron 3 Super 120B (free)</option>
+         <option value="openrouter-or-gemma">🌐 Gemma 4 31B (free)</option>
+         <option value="openrouter-or-nemotron-nano">🌐 Nemotron 3 Nano 30B (free)</option>
+       </select>
+       <div id="llmModelInfo" style="font-size:9px;color:var(--text3);margin-top:2px"></div>
+       <button onclick="saveDefaultLLM()" style="font-size:9px;padding:1px 6px;margin-top:3px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);color:var(--text2);cursor:pointer">📌 По умолчанию</button>
+     </div>
+
+     <!-- 2. ИИ для векторизации -->
+     <div class="ai-section" style="margin-bottom:10px">
+       <div style="font-size:11px;color:var(--text2);margin-bottom:3px;font-weight:600">📊 Векторизация</div>
+       <select id="embeddingDropdown" onchange="setEmbeddingProvider(this.value)" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text1)">
+         <option value="ollama">🏠 Ollama nomic-embed (free · ~1s)</option>
+         <option value="qwen">⚡ Qwen 3 Embed 8B (0.88₽/M · ~100ms)</option>
+       </select>
+       <div id="embeddingInfo" style="font-size:9px;color:var(--text3);margin-top:2px"></div>
+       <button onclick="saveDefaultEmbedding()" style="font-size:9px;padding:1px 6px;margin-top:3px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);color:var(--text2);cursor:pointer">📌 По умолчанию</button>
+     </div>
+
+     <!-- 3. ИИ для чат RAG -->
+     <div class="ai-section" style="margin-bottom:10px">
+       <div style="font-size:11px;color:var(--text2);margin-bottom:3px;font-weight:600">💬 Чат RAG</div>
+       <select id="ragChatDropdown" onchange="setRagChatModel(this.value)" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text1)">
+         <option value="nvidia/nemotron-3-nano-30b-a3b:free">⚡ Nemotron 3 Nano 30B (fast)</option>
+         <option value="nvidia/nemotron-3-super-120b-a12b:free">🧠 Nemotron 3 Super 120B</option>
+         <option value="google/gemma-4-31b-it:free">🌐 Gemma 4 31B</option>
+       </select>
+       <div id="ragChatInfo" style="font-size:9px;color:var(--text3);margin-top:2px"></div>
+       <button onclick="saveDefaultRAGChat()" style="font-size:9px;padding:1px 6px;margin-top:3px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);color:var(--text2);cursor:pointer">📌 По умолчанию</button>
+     </div>
+
+     <!-- Остальные настройки -->
+     <hr style="border:none;border-top:1px solid var(--border);margin:8px 0">
+     <label class="auto-analyze-toggle" style="margin-top:2px">
+       <input type="checkbox" id="autoAnalyzeSwitch" onchange="toggleAutoAnalyze()">
+       <span>🤖 Авто-анализ новых</span>
+     </label>
+     <div style="font-size:10px;color:var(--text2);margin-top:2px;padding-left:4px">
+       Sync с Polza.AI каждые 5 мин · анализ при включении
+     </div>
+     <div class="theme-toggle">
+       <input type="checkbox" id="themeSwitch" onchange="toggleTheme()">
+       <span>Светлая тема</span>
+     </div>
+     <label style="font-size:12px;display:flex;align-items:center;gap:6px;margin-bottom:6px">
+       <input type="checkbox" id="setAutoRefresh" onchange="toggleAutoRefresh()" checked>
+       Автообновление
+       <select id="setRefreshInterval" onchange="applyRefreshInterval()" style="font-size:11px;padding:1px 4px;border-radius:3px">
+         <option value="10">10 сек</option>
+         <option value="30">30 сек</option>
+         <option value="60" selected>60 сек</option>
+         <option value="120">2 мин</option>
+         <option value="300">5 мин</option>
+       </select>
+     </label>
+     <label style="font-size:12px">Записей на странице
+       <input type="number" id="setLimit" value="50" min="10" max="500" step="10" onchange="S.limit=+this.value;goPage(1)">
+     </label>
+   </div>
     <h3>ℹ️ Подсказки</h3>
     <div style="font-size:11px;color:var(--text2);line-height:1.6">
       <p>Клик по строке → детали генерации</p>

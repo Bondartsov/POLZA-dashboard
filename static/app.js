@@ -168,93 +168,105 @@ async function loadProviderConfig() {
     const cfg = await r.json();
     S.providerConfig = cfg;
     S.provider = cfg.provider;
-    // Update radio buttons
-    const radios = document.querySelectorAll('input[name="provider"]');
-    radios.forEach(r => r.checked = (r.value === S.provider));
-    // Update info labels
-    if (cfg.ollama) {
-      const oi = document.getElementById('providerOllamaInfo');
-      if (oi) oi.textContent = `${cfg.ollama.chatModel} · $0.00`;
+
+    // 1. LLM Provider dropdown
+    const llmDd = document.getElementById('llmProviderDropdown');
+    if (llmDd) {
+      if (cfg.provider === 'openrouter' && cfg.openrouter?.model) {
+        let suffix = '';
+        if (cfg.openrouter.model.includes('nano')) suffix = 'nemotron-nano';
+        else if (cfg.openrouter.model.includes('gemma')) suffix = 'gemma';
+        else suffix = 'nemotron-super';
+        llmDd.value = 'openrouter-or-' + suffix;
+      } else {
+        llmDd.value = cfg.provider;
+      }
+      const llmInfo = document.getElementById('llmModelInfo');
+      if (llmInfo) {
+        const sel = llmDd.options[llmDd.selectedIndex];
+        llmInfo.textContent = sel ? sel.textContent.replace(/^[^\s]+ /, '') : '';
+      }
     }
-    if (cfg.anthropic) {
-      const ai = document.getElementById('providerAnthropicInfo');
-      if (ai) ai.textContent = `${cfg.anthropic.model} · ~$0.002`;
+
+    // 2. Embedding provider dropdown
+    const embDd = document.getElementById('embeddingDropdown');
+    if (embDd && cfg.embedding) {
+      embDd.value = cfg.embedding.provider;
+      const embInfo = document.getElementById('embeddingInfo');
+      if (embInfo) {
+        const sel = embDd.options[embDd.selectedIndex];
+        embInfo.textContent = sel ? sel.textContent.replace(/^[^\s]+ /, '') : '';
+      }
     }
-    if (cfg.openrouter) {
-      const ori = document.getElementById('providerOpenRouterInfo');
-      if (ori) ori.textContent = `$0.00`;
-      const dd = document.getElementById('orModelDropdown');
-      if (dd && cfg.openrouter.model) dd.value = cfg.openrouter.model;
+
+    // 3. RAG Chat model dropdown
+    const ragDd = document.getElementById('ragChatDropdown');
+    if (ragDd && cfg.ragChat) {
+      ragDd.value = cfg.ragChat.model;
+      const ragInfo = document.getElementById('ragChatInfo');
+      if (ragInfo) {
+        const sel = ragDd.options[ragDd.selectedIndex];
+        ragInfo.textContent = sel ? sel.textContent.replace(/^[^\s]+ /, '') : '';
+      }
     }
-    // Show/hide model dropdown
-    const orSel = document.getElementById('openrouterModelSelect');
-    if (orSel) orSel.style.display = cfg.provider === 'openrouter' ? '' : 'none';
+
     // Auto-analyze checkbox
     const aa = document.getElementById('autoAnalyzeSwitch');
     if (aa) aa.checked = cfg.autoAnalyze === true;
-    // RAG Chat model dropdown
-    if (cfg.ragChat) {
-      const ragDd = document.getElementById('ragChatModelDropdown');
-      if (ragDd && cfg.ragChat.model) ragDd.value = cfg.ragChat.model;
-    }
-    // Embedding provider radio buttons
-    if (cfg.embedding) {
-      const embRadios = document.querySelectorAll('input[name="embedding"]');
-      embRadios.forEach(r => r.checked = (r.value === cfg.embedding.provider));
-      const embStatus = document.getElementById('embeddingStatus');
-      if (embStatus) {
-        embStatus.textContent = cfg.embedding.provider === 'qwen' 
-          ? '⚡ Qwen 3 Embed 8B (cloud, fast)' 
-          : '🏠 Ollama nomic (local, slow)';
-      }
-    }
-    // Default provider badge — show what's saved in .env
-    updateDefaultBadge(cfg);
   } catch(e) { console.warn('provider config load failed:', e); }
 }
 
-async function setProvider(provider) {
+// === 1. LLM Provider ===
+async function setLLMProvider(val) {
   try {
+    let provider, orModel;
+    if (val.startsWith('openrouter-or-')) {
+      provider = 'openrouter';
+      const shortName = val.replace('openrouter-or-', '');
+      if (shortName === 'nemotron-super') orModel = 'nvidia/nemotron-3-super-120b-a12b:free';
+      else if (shortName === 'gemma') orModel = 'google/gemma-4-31b-it:free';
+      else if (shortName === 'nemotron-nano') orModel = 'nvidia/nemotron-3-nano-30b-a3b:free';
+      else orModel = 'nvidia/nemotron-3-super-120b-a12b:free';
+    } else {
+      provider = val;
+    }
+
+    const body = {provider};
+    if (orModel) body.openrouterModel = orModel;
+
     const r = await fetch('/api/provider/set', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({provider}),
+      body: JSON.stringify(body),
     });
     if (!r.ok) return;
     S.provider = provider;
-    if (S.providerConfig) S.providerConfig.provider = provider;
-    // Show/hide model dropdown
-    const orSel = document.getElementById('openrouterModelSelect');
-    if (orSel) orSel.style.display = provider === 'openrouter' ? '' : 'none';
-  } catch(e) { console.warn('provider switch failed:', e); }
+    if (S.providerConfig) {
+      S.providerConfig.provider = provider;
+      if (orModel && S.providerConfig.openrouter) S.providerConfig.openrouter.model = orModel;
+    }
+    const llmInfo = document.getElementById('llmModelInfo');
+    const dd = document.getElementById('llmProviderDropdown');
+    if (llmInfo && dd) {
+      const sel = dd.options[dd.selectedIndex];
+      llmInfo.textContent = '✅ ' + (sel ? sel.textContent.replace(/^[^\s]+ /, '') : provider);
+    }
+  } catch(e) { console.warn('LLM provider switch failed:', e); }
 }
 
-async function setOpenRouterModel(model) {
+async function saveDefaultLLM() {
   try {
-    const r = await fetch('/api/provider/set', {
+    await fetch('/api/provider/set', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({openrouterModel: model}),
+      body: JSON.stringify({saveDefault: true}),
     });
-    if (!r.ok) return;
-    if (S.providerConfig && S.providerConfig.openrouter) S.providerConfig.openrouter.model = model;
-    if (document.getElementById('defaultProviderSwitch')?.checked) updateDefaultBadge(S.providerConfig);
-  } catch(e) { console.warn('openrouter model switch failed:', e); }
+    const info = document.getElementById('llmModelInfo');
+    if (info) info.textContent += ' 📌';
+  } catch(e) { console.warn('save default LLM failed:', e); }
 }
 
-async function setRagChatModel(model) {
-  try {
-    const r = await fetch('/api/provider/set', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ragChatModel: model}),
-    });
-    if (!r.ok) return;
-    if (S.providerConfig && S.providerConfig.ragChat) S.providerConfig.ragChat.model = model;
-    console.log('[RAG Chat] model switched to', model);
-  } catch(e) { console.warn('RAG chat model switch failed:', e); }
-}
-
+// === 2. Embedding Provider ===
 async function setEmbeddingProvider(provider) {
   try {
     const r = await fetch('/api/provider/set', {
@@ -264,43 +276,56 @@ async function setEmbeddingProvider(provider) {
     });
     if (!r.ok) return;
     if (S.providerConfig && S.providerConfig.embedding) S.providerConfig.embedding.provider = provider;
-    const statusEl = document.getElementById('embeddingStatus');
-    if (statusEl) {
-      statusEl.textContent = provider === 'qwen' ? '⚡ Qwen 3 Embed 8B (cloud, fast)' : '🏠 Ollama nomic (local, slow)';
+    const info = document.getElementById('embeddingInfo');
+    const dd = document.getElementById('embeddingDropdown');
+    if (info && dd) {
+      const sel = dd.options[dd.selectedIndex];
+      info.textContent = '✅ ' + (sel ? sel.textContent.replace(/^[^\s]+ /, '') : provider);
     }
-    console.log('[Embedding] provider switched to', provider);
-  } catch(e) { console.warn('Embedding provider switch failed:', e); }
+  } catch(e) { console.warn('Embedding switch failed:', e); }
 }
 
-async function setDefaultProvider() {
-  const checked = document.getElementById('defaultProviderSwitch').checked;
-  if (checked) {
-    // Save current provider to .env via backend
-    try {
-      await fetch('/api/provider/set', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({saveDefault: true}),
-      });
-      updateDefaultBadge(S.providerConfig);
-    } catch(e) { console.warn('save default failed:', e); }
-  } else {
-    document.getElementById('defaultProviderBadge').textContent = '';
-  }
+async function saveDefaultEmbedding() {
+  try {
+    await fetch('/api/provider/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({saveEmbeddingDefault: true}),
+    });
+    const info = document.getElementById('embeddingInfo');
+    if (info) info.textContent += ' 📌';
+  } catch(e) { console.warn('save default embedding failed:', e); }
 }
 
-function updateDefaultBadge(cfg) {
-  const badge = document.getElementById('defaultProviderBadge');
-  const cb = document.getElementById('defaultProviderSwitch');
-  if (!badge || !cfg) return;
-  const saved = cfg.savedDefault || '';
-  const current = cfg.provider + (cfg.provider === 'openrouter' && cfg.openrouter ? '/' + cfg.openrouter.model : '');
-  if (saved === current) {
-    badge.textContent = '(сохранено)';
-    if (cb) cb.checked = true;
-  } else {
-    badge.textContent = '';
-  }
+// === 3. RAG Chat Model ===
+async function setRagChatModel(model) {
+  try {
+    const r = await fetch('/api/provider/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ragChatModel: model}),
+    });
+    if (!r.ok) return;
+    if (S.providerConfig && S.providerConfig.ragChat) S.providerConfig.ragChat.model = model;
+    const info = document.getElementById('ragChatInfo');
+    const dd = document.getElementById('ragChatDropdown');
+    if (info && dd) {
+      const sel = dd.options[dd.selectedIndex];
+      info.textContent = '✅ ' + (sel ? sel.textContent.replace(/^[^\s]+ /, '') : model);
+    }
+  } catch(e) { console.warn('RAG chat switch failed:', e); }
+}
+
+async function saveDefaultRAGChat() {
+  try {
+    await fetch('/api/provider/set', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({saveRagChatDefault: true}),
+    });
+    const info = document.getElementById('ragChatInfo');
+    if (info) info.textContent += ' 📌';
+  } catch(e) { console.warn('save RAG chat default failed:', e); }
 }
 
 async function toggleAutoAnalyze() {
@@ -318,12 +343,32 @@ async function toggleAutoAnalyze() {
 }
 
 function getProviderLabel() {
-  if (S.provider === 'ollama') return 'Qwen · бесплатно';
-  if (S.provider === 'openrouter') {
-    const dd = document.getElementById('orModelDropdown');
-    const label = dd ? dd.options[dd.selectedIndex].text : 'Nemotron 3';
-    return label + ' · бесплатно';
+  const llmDd = document.getElementById('llmProviderDropdown');
+  let llmName = S.provider || 'LLM';
+  if (llmDd && llmDd.selectedIndex >= 0) {
+    // Format: "🏠 Ollama On-Prem (Qwen 3.5 · free)" -> "Ollama On-Prem"
+    let text = llmDd.options[llmDd.selectedIndex].text;
+    text = text.replace(/^[^\s]+ /, ''); // remove emoji
+    llmName = text.split(' (')[0];
   }
+
+  const embDd = document.getElementById('embeddingDropdown');
+  let embName = S.providerConfig?.embedding?.provider || 'Emb';
+  if (embDd && embDd.selectedIndex >= 0) {
+    // Format: "⚡ Qwen 3 Embed 8B (0.88₽/M · ~100ms)" -> "Qwen 3 Embed 8B"
+    let text = embDd.options[embDd.selectedIndex].text;
+    text = text.replace(/^[^\s]+ /, ''); // remove emoji
+    embName = text.split(' (')[0];
+  }
+
+  return `${llmName} + ${embName}`;
+}
+
+function getProviderEstimate() {
+  if (S.provider === 'ollama') return '5-10s';
+  if (S.provider === 'openrouter') return '5-15s';
+  return '2-3s';
+}
   return 'Haiku · ~$0.002';
 }
 
