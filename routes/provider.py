@@ -98,9 +98,7 @@ def api_provider_set():
         if provider in ("ollama", "qwen"):
             _provider_state["embedding_provider"] = provider
             _config.EMBEDDING_PROVIDER = provider
-            # Reinitialize embedding functions
-            from embeddings import _get_embedding_functions
-            _embed_text, _extract_user_text_from_log = _get_embedding_functions()
+            # No need to reimport — lazy dispatch in embeddings/__init__.py picks up change automatically
             print(f"[Provider] embedding provider switched to {provider}")
     _persist_provider_to_env()
     return jsonify({
