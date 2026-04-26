@@ -40,6 +40,24 @@ def _analyze_single_gen(gen_id: str) -> dict:
             headers=_headers(token), timeout=30,
         )
         if r.status_code != 200:
+            # WAVE-2 FIX: If API returns 400/404 for a log, don't fail the whole job.
+            # Mark as skipped and create an empty cache entry so we don't retry it forever.
+            if r.status_code in (400, 404):
+                try:
+                    gen_summary_upsert(
+                        generation_id=gen_id,
+                        summary="[Лог недоступен в API]",
+                        topic="Неизвестно",
+                        is_work=False,
+                        risk_flags=["api_error"],
+                        llm_model="none",
+                        llm_cost=0.0,
+                        input_tokens=0,
+                        output_tokens=0,
+                    )
+                except Exception:
+                    pass
+                return {"status": "skipped", "detail": f"HTTP {r.status_code} (marked as empty)"}
             return {"status": "error", "detail": f"HTTP {r.status_code}"}
 
         total_text = _extract_user_text_from_log(r.json(), limit_chars=4000)
