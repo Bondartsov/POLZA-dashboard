@@ -262,7 +262,10 @@ async function saveDefaultLLM() {
       body: JSON.stringify({saveDefault: true}),
     });
     const info = document.getElementById('llmModelInfo');
-    if (info) info.textContent += ' 📌';
+    if (info) {
+      // Strip any previous 📌 markers and append exactly one
+      info.textContent = info.textContent.replace(/\s*📌.*$/, '').trim() + ' 📌 сохранено';
+    }
   } catch(e) { console.warn('save default LLM failed:', e); }
 }
 
@@ -293,7 +296,9 @@ async function saveDefaultEmbedding() {
       body: JSON.stringify({saveEmbeddingDefault: true}),
     });
     const info = document.getElementById('embeddingInfo');
-    if (info) info.textContent += ' 📌';
+    if (info) {
+      info.textContent = info.textContent.replace(/\s*📌.*$/, '').trim() + ' 📌 сохранено';
+    }
   } catch(e) { console.warn('save default embedding failed:', e); }
 }
 
@@ -324,7 +329,9 @@ async function saveDefaultRAGChat() {
       body: JSON.stringify({saveRagChatDefault: true}),
     });
     const info = document.getElementById('ragChatInfo');
-    if (info) info.textContent += ' 📌';
+    if (info) {
+      info.textContent = info.textContent.replace(/\s*📌.*$/, '').trim() + ' 📌 сохранено';
+    }
   } catch(e) { console.warn('save RAG chat default failed:', e); }
 }
 
