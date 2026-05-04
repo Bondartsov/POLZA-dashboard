@@ -44,39 +44,6 @@
        <button onclick="saveDefaultLLM()" style="font-size:9px;padding:1px 6px;margin-top:3px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);color:var(--text2);cursor:pointer">📌 По умолчанию</button>
      </div>
 
-     <!-- 2. ИИ для векторизации -->
-     <div class="ai-section" style="margin-bottom:10px">
-       <div style="font-size:11px;color:var(--text2);margin-bottom:3px;font-weight:600;display:flex;align-items:center;gap:6px">
-         <span>📊 Векторизация</span>
-         <label style="margin-left:auto;display:flex;align-items:center;gap:4px;font-size:10px;cursor:pointer">
-           <input type="checkbox" id="embeddingEnabledSwitch" onchange="toggleEmbeddingEnabled()" style="margin:0">
-           <span id="embeddingEnabledLabel">Выкл</span>
-         </label>
-       </div>
-       <select id="embeddingDropdown" onchange="setEmbeddingProvider(this.value)" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text1)">
-         <option value="ollama">🏠 Ollama nomic-embed (free · ~1s)</option>
-         <option value="qwen">⚡ Qwen 3 Embed 8B (0.88₽/M · ~100ms)</option>
-       </select>
-       <div id="embeddingInfo" style="font-size:9px;color:var(--text3);margin-top:2px"></div>
-       <div style="display:flex;gap:4px;margin-top:3px">
-         <button onclick="saveDefaultEmbedding()" style="font-size:9px;padding:1px 6px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);color:var(--text2);cursor:pointer">📌 По умолчанию</button>
-         <button id="btnVectorizeExisting" onclick="startVectorizeExisting()" style="font-size:9px;padding:1px 6px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);color:var(--text2);cursor:pointer" title="Векторизовать только существующие AI-саммари (без повторного LLM-анализа)">🧬 Векторизовать существующие</button>
-       </div>
-       <div id="vectorizeStatus" style="font-size:9px;color:var(--text3);margin-top:3px"></div>
-     </div>
-
-     <!-- 3. ИИ для чат RAG -->
-     <div class="ai-section" style="margin-bottom:10px">
-       <div style="font-size:11px;color:var(--text2);margin-bottom:3px;font-weight:600">💬 Чат RAG</div>
-       <select id="ragChatDropdown" onchange="setRagChatModel(this.value)" style="width:100%;padding:4px 6px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text1)">
-         <option value="nvidia/nemotron-3-nano-30b-a3b:free">⚡ Nemotron 3 Nano 30B (fast)</option>
-         <option value="nvidia/nemotron-3-super-120b-a12b:free">🧠 Nemotron 3 Super 120B</option>
-         <option value="google/gemma-4-31b-it:free">🌐 Gemma 4 31B</option>
-       </select>
-       <div id="ragChatInfo" style="font-size:9px;color:var(--text3);margin-top:2px"></div>
-       <button onclick="saveDefaultRAGChat()" style="font-size:9px;padding:1px 6px;margin-top:3px;border:1px solid var(--border);border-radius:3px;background:var(--bg3);color:var(--text2);cursor:pointer">📌 По умолчанию</button>
-     </div>
-
      <!-- Остальные настройки -->
      <hr style="border:none;border-top:1px solid var(--border);margin:8px 0">
      <label class="auto-analyze-toggle" style="margin-top:2px">
