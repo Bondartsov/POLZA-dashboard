@@ -5,6 +5,11 @@ from sqlalchemy import func, desc
 
 from config import get_session, Generation, summary_get_or_none
 
+
+def _exclude_embeddings(query):
+    """Filter out embedding models (model name contains 'embed')."""
+    return query.filter(~func.coalesce(Generation.model, '').ilike('%embed%'))
+
 employee_bp = Blueprint('employee', __name__)
 
 
@@ -86,6 +91,8 @@ def api_employee_report_list():
             Generation.source_key_name != "",
         )
 
+        q = _exclude_embeddings(q)
+
         date_from = request.args.get("dateFrom")
         date_to = request.args.get("dateTo")
         if date_from:
@@ -141,6 +148,8 @@ def api_employee_report():
     dbs = get_session()
     try:
         q = dbs.query(Generation).filter(Generation.source_key_name == employee)
+
+        q = _exclude_embeddings(q)
 
         if date_from_str:
             try:

@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request
 from datetime import datetime
-from sqlalchemy import desc, asc
+from sqlalchemy import desc, asc, func
 
 from config import get_session, Generation, _provider_state
 
@@ -42,6 +42,8 @@ def _apply_filters(query, args):
             (Generation.api_key_name.ilike(f"%{search}%")) |
             (Generation.id.ilike(f"%{search}%"))
         )
+    # Always exclude embedding models from all reports and counters
+    query = query.filter(~func.coalesce(Generation.model, '').ilike('%embed%'))
     return query
 
 

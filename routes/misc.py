@@ -1,4 +1,5 @@
 from flask import Blueprint, jsonify, send_from_directory
+from sqlalchemy import func
 
 from config import get_session, ApiKey, Generation, AUTH_TOKEN, sync_worker, STATIC_DIR
 
@@ -32,7 +33,9 @@ def api_config():
 def api_health():
     session = get_session()
     try:
-        total = session.query(Generation).count()
+        total = session.query(Generation).filter(
+            ~func.coalesce(Generation.model, '').ilike('%embed%')
+        ).count()
         keys = session.query(ApiKey).count()
         return jsonify({
             "status": "ok", "db": "connected",
