@@ -17,14 +17,13 @@ from config import (
     OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL,
     OLLAMA_THINKING, OLLAMA_TIMEOUT,
     OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_BASE_URL, OPENROUTER_MODELS,
-    QDRANT_URL, QDRANT_COLLECTION, QDRANT_ENABLED, SYNC_INTERVAL,
+    SYNC_INTERVAL,
     get_session, ApiKey, Generation, init_db, parse_keys_text, sync_worker,
 )
 from config import sync_worker as _sync_worker_module
 from sync_worker import SyncWorker
 from routes import register_all
 from workers.analyze_all import _analyze_all, _analyze_all_worker
-from embeddings.qdrant import _qdrant_ensure_collection
 
 
 def main():
@@ -51,30 +50,10 @@ def main():
     config.OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
     config.OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", config.OPENROUTER_MODEL)
     config.OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", config.OPENROUTER_BASE_URL)
-    config.QDRANT_URL = os.environ.get("QDRANT_URL", config.QDRANT_URL)
-    config.QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", config.QDRANT_COLLECTION)
-    config.QDRANT_ENABLED = os.environ.get("QDRANT_ENABLED", "true").lower() in ("true", "1", "yes")
-
-    config.RAG_CHAT_MODEL = os.environ.get("RAG_CHAT_MODEL", config.RAG_CHAT_MODEL)
-    config.RAG_MAX_SOURCES = int(os.environ.get("RAG_MAX_SOURCES", config.RAG_MAX_SOURCES))
-    config.RAG_MIN_SCORE = float(os.environ.get("RAG_MIN_SCORE", config.RAG_MIN_SCORE))
-    config.RAG_MAX_HISTORY = int(os.environ.get("RAG_MAX_HISTORY", config.RAG_MAX_HISTORY))
-    config.RAG_MAX_TOKENS = int(os.environ.get("RAG_MAX_TOKENS", config.RAG_MAX_TOKENS))
-    config.RAG_TEMPERATURE = float(os.environ.get("RAG_TEMPERATURE", config.RAG_TEMPERATURE))
-    config.RAG_SESSION_TTL = int(os.environ.get("RAG_SESSION_TTL", config.RAG_SESSION_TTL))
-
     _provider_state["provider"] = config.LLM_PROVIDER
     _provider_state["openrouter_model"] = config.OPENROUTER_MODEL
-    _provider_state["rag_chat_model"] = config.RAG_CHAT_MODEL
     auto_analyze_env = os.environ.get("AUTO_ANALYZE", "false").lower() in ("true", "1", "yes")
     _provider_state["auto_analyze"] = auto_analyze_env
-
-    # Embedding settings
-    config.EMBEDDING_PROVIDER = os.environ.get("EMBEDDING_PROVIDER", config.EMBEDDING_PROVIDER)
-    config.EMBEDDING_ENABLED = os.environ.get("EMBEDDING_ENABLED", "false").lower() in ("true", "1", "yes")
-    _provider_state["embedding_provider"] = config.EMBEDDING_PROVIDER
-    _provider_state["embedding_enabled"] = config.EMBEDDING_ENABLED
-    print(f"   Embedding: provider={config.EMBEDDING_PROVIDER}, enabled={config.EMBEDDING_ENABLED}")
 
     provider_icon = {"ollama": "On-Prem", "anthropic": "Cloud", "openrouter": "OpenRouter"}.get(config.LLM_PROVIDER, "?")
     print(f"LLM provider: {provider_icon} ({config.LLM_PROVIDER})")
@@ -84,7 +63,6 @@ def main():
         print(f"   OpenRouter: model={config.OPENROUTER_MODEL}, key={'yes' if config.OPENROUTER_API_KEY else 'no'}")
     else:
         print(f"   Anthropic: url={config.LLM_API_URL}, model={config.LLM_MODEL}, key={'yes' if config.LLM_API_KEY else 'no'}")
-    print(f"   Qdrant: {config.QDRANT_URL}/{config.QDRANT_COLLECTION} ({'enabled' if config.QDRANT_ENABLED else 'disabled'})")
     print(f"   Auto-analyze: {'ON' if auto_analyze_env else 'OFF'}")
 
     init_db()
@@ -111,12 +89,6 @@ def main():
                 t.start()
     except Exception as e:
         print(f"Resume analyze-all failed: {e}")
-
-    if config.QDRANT_ENABLED:
-        if _qdrant_ensure_collection():
-            print(f"Qdrant collection '{config.QDRANT_COLLECTION}' ready")
-        else:
-            print(f"Qdrant init failed — embeddings will be skipped")
 
     if config.AUTH_TOKEN:
         session = get_session()

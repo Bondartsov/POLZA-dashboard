@@ -1,20 +1,33 @@
 import json
 from flask import Blueprint, jsonify, request
-from concurrent.futures import ThreadPoolExecutor
 
 from config import (
     get_session, Generation, _resolve_token_for_gen, _headers, _provider_state,
     OLLAMA_CHAT_MODEL, OLLAMA_TIMEOUT, POLZA_API,
     gen_summary_get_or_none, gen_summary_get_many, gen_summary_upsert, gen_summary_delete,
-    gen_summary_mark_vectorized,
 )
 import requests as http_requests
 from providers.dispatcher import _llm_call_summarize
-from embeddings import _embed_text, _extract_user_text_from_log
-from embeddings.qdrant import _qdrant_upsert
-from embeddings.payload import _build_qdrant_payload
 
 summarize_bp = Blueprint('summarize', __name__)
+
+
+def _extract_user_text_from_log(log_data: dict, limit_chars: int = 4000) -> str:
+    msgs = log_data.get("request", {}).get("messages", [])
+    user_parts = []
+    for m in msgs:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "user" and content:
+            user_parts.append(str(content)[:1200])
+    total_text = "\n---\n".join(user_parts)[:limit_chars]
+    if not total_text.strip():
+        for m in msgs:
+            content = m.get("content", "")
+            if content:
+                user_parts.append(str(content)[:1200])
+        total_text = "\n---\n".join(user_parts)[:limit_chars]
+    return total_text.strip()
 
 
 @summarize_bp.route("/api/generation/summarize", methods=["POST"])
@@ -25,13 +38,11 @@ def api_generation_summarize():
     if not gen_id:
         return jsonify({"error": "generationId required"}), 400
 
-    # START_BLOCK_GEN_CACHE_CHECK
     if not force:
         cached = gen_summary_get_or_none(gen_id)
         if cached:
             print(f"[GenSummarize][cache_hit] generation_id={gen_id[:16]}")
             return jsonify(cached.to_dict())
-    # END_BLOCK_GEN_CACHE_CHECK
 
     try:
         token = _resolve_token_for_gen(gen_id)
@@ -56,43 +67,17 @@ def api_generation_summarize():
                 "isWork": True, "generationId": gen_id, "cached": False,
             }), 200
 
-        # START_BLOCK_GEN_CALL_LLM
         provider = _provider_state["provider"]
         active_model = OLLAMA_CHAT_MODEL if provider == "ollama" else ""
         print(f"[GenSummarize][LLM] provider={provider} model={active_model} text_chars={len(total_text)}")
 
-        llm_result = [None, None]
-        embed_result = [None]
-        embedding_enabled = _provider_state.get("embedding_enabled", False)
-
-        def _run_llm():
-            llm_result[0], llm_result[1] = _llm_call_summarize(total_text)
-
-        def _run_embed():
-            embed_result[0] = _embed_text(total_text)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            llm_future = pool.submit(_run_llm)
-            llm_future.result(timeout=OLLAMA_TIMEOUT if provider == "ollama" else 45)
-            
-            # Only run embedding if enabled in settings
-            if embedding_enabled:
-                embed_future = pool.submit(_run_embed)
-                try:
-                    embed_future.result(timeout=30)
-                except Exception as e:
-                    print(f"[GenSummarize][embed] non-fatal: {e}")
-                    embed_result[0] = None
-
-        parsed, usage = llm_result
+        parsed, usage = _llm_call_summarize(total_text)
         print(
             f"[GenSummarize][LLM] ok provider={provider} "
             f"input={usage['input_tokens']} output={usage['output_tokens']} "
             f"cost=${usage['cost_usd']:.6f}"
         )
-        # END_BLOCK_GEN_CALL_LLM
 
-        # START_BLOCK_GEN_CACHE_STORE
         try:
             gen_summary_upsert(
                 generation_id=gen_id,
@@ -110,32 +95,6 @@ def api_generation_summarize():
             )
         except Exception as e:
             print(f"[GenSummarize][cache_store] non-fatal: {e}")
-        # END_BLOCK_GEN_CACHE_STORE
-
-        # START_BLOCK_GEN_VECTOR_STORE
-        vector_stored = False
-        if embed_result[0]:
-            dbs = get_session()
-            gen_meta = None
-            try:
-                gen_obj = dbs.query(Generation).get(gen_id)
-                if gen_obj:
-                    gen_meta = gen_obj.to_dict()
-            finally:
-                dbs.close()
-
-            qdrant_payload = _build_qdrant_payload(
-                gen_meta=gen_meta or {},
-                analysis=parsed,
-                user_text_snippet=total_text,
-            )
-            vector_stored = _qdrant_upsert(gen_id, embed_result[0], qdrant_payload)
-            if vector_stored:
-                try:
-                    gen_summary_mark_vectorized(gen_id, True)
-                except Exception as e:
-                    print(f"[GenSummarize][mark_vectorized] non-fatal: {e}")
-        # END_BLOCK_GEN_VECTOR_STORE
 
         return jsonify({
             "generationId": gen_id,
@@ -151,7 +110,6 @@ def api_generation_summarize():
             "inputTokens": usage["input_tokens"],
             "outputTokens": usage["output_tokens"],
             "provider": provider,
-            "vectorStored": vector_stored,
             "cached": False,
         })
 

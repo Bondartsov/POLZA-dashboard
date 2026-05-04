@@ -4,8 +4,6 @@ from config import (
     _provider_state, _persist_provider_to_env,
     OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_EMBED_MODEL, OLLAMA_THINKING,
     OPENROUTER_MODEL, OPENROUTER_MODELS,
-    RAG_CHAT_MODELS,
-    QWEN_EMBED_MODEL, QWEN_EMBED_API_URL,
     BASE_DIR,
 )
 
@@ -32,18 +30,6 @@ def api_provider_config():
             "model": _provider_state.get("openrouter_model", OPENROUTER_MODEL),
             "models": [{"id": k, "label": v} for k, v in OPENROUTER_MODELS.items()],
             "available": bool(_config.OPENROUTER_API_KEY),
-        },
-        "ragChat": {
-            "model": _provider_state.get("rag_chat_model", _config.RAG_CHAT_MODEL),
-            "models": [{"id": k, "label": v} for k, v in RAG_CHAT_MODELS.items()],
-        },
-        "embedding": {
-            "provider": _provider_state.get("embedding_provider", "ollama"),
-            "enabled": _provider_state.get("embedding_enabled", False),
-            "providers": [
-                {"id": "ollama", "label": "Ollama (Local, Free, Slow)", "info": "nomic-embed-text-v2-moe, ~1s/request"},
-                {"id": "qwen", "label": "Qwen 3 Embedding 8B (Cloud, $0.0088/M, Fast)", "info": "0.88 РУБ/1M tokens, ~100ms/request"},
-            ],
         },
     }
     if provider == "ollama":
@@ -81,42 +67,21 @@ def api_provider_set():
         _provider_state["provider"] = provider
         print(f"[Provider] switched to {provider}")
     if "autoAnalyze" in data:
-        _provider_state["auto_analyze"] = bool(data["autoAnalyze"])
+        _provider_state["auto_analyze"] = bool(data["auto_analyze"])
         print(f"[Provider] auto_analyze={_provider_state['auto_analyze']}")
     if "openrouterModel" in data:
         model = data["openrouterModel"]
         if model in OPENROUTER_MODELS:
             _provider_state["openrouter_model"] = model
             print(f"[Provider] openrouter model switched to {model}")
-    if "ragChatModel" in data:
-        model = data["ragChatModel"]
-        if model in RAG_CHAT_MODELS:
-            _provider_state["rag_chat_model"] = model
-            _config.RAG_CHAT_MODEL = model
-            print(f"[Provider] RAG chat model switched to {model}")
-    if "embeddingProvider" in data:
-        provider = data["embeddingProvider"]
-        if provider in ("ollama", "qwen"):
-            _provider_state["embedding_provider"] = provider
-            _config.EMBEDDING_PROVIDER = provider
-            # No need to reimport — lazy dispatch in embeddings/__init__.py picks up change automatically
-            print(f"[Provider] embedding provider switched to {provider}")
-    if "embeddingEnabled" in data:
-        enabled = bool(data["embeddingEnabled"])
-        _provider_state["embedding_enabled"] = enabled
-        _config.EMBEDDING_ENABLED = enabled
-        print(f"[Provider] embedding {'ENABLED' if enabled else 'DISABLED'}")
-    
-    if data.get("saveDefault") or data.get("saveEmbeddingDefault") or data.get("saveRagChatDefault") or "saveDefault" in data:
+
+    if data.get("saveDefault"):
         _persist_provider_to_env()
         print("[Provider] Persisted settings to .env")
-        
+
     return jsonify({
         "ok": True,
         "provider": _provider_state["provider"],
         "autoAnalyze": _provider_state["auto_analyze"],
         "openrouterModel": _provider_state.get("openrouter_model", OPENROUTER_MODEL),
-        "ragChatModel": _provider_state.get("rag_chat_model", _config.RAG_CHAT_MODEL),
-        "embeddingProvider": _provider_state.get("embedding_provider", "ollama"),
-        "embeddingEnabled": _provider_state.get("embedding_enabled", False),
     })

@@ -7,14 +7,28 @@ from config import (
     get_session, Generation, _resolve_token_for_gen, _headers,
     _provider_state, OLLAMA_TIMEOUT, POLZA_API,
     gen_summary_get_or_none, gen_summary_get_many, gen_summary_upsert,
-    gen_summary_mark_vectorized,
     get_analysis_state, update_analysis_state, get_analysis_counts,
 )
 import requests as http_requests
 from providers.dispatcher import _llm_call_summarize
-from embeddings import _embed_text, _extract_user_text_from_log
-from embeddings.qdrant import _qdrant_upsert
-from embeddings.payload import _build_qdrant_payload
+
+
+def _extract_user_text_from_log(log_data: dict, limit_chars: int = 4000) -> str:
+    msgs = log_data.get("request", {}).get("messages", [])
+    user_parts = []
+    for m in msgs:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "user" and content:
+            user_parts.append(str(content)[:1200])
+    total_text = "\n---\n".join(user_parts)[:limit_chars]
+    if not total_text.strip():
+        for m in msgs:
+            content = m.get("content", "")
+            if content:
+                user_parts.append(str(content)[:1200])
+        total_text = "\n---\n".join(user_parts)[:limit_chars]
+    return total_text.strip()
 
 _analyze_all = {
     "running": False,
@@ -65,31 +79,7 @@ def _analyze_single_gen(gen_id: str) -> dict:
         if not total_text:
             return {"status": "skipped", "detail": "empty text"}
 
-        llm_result = [None, None]
-        embed_result = [None]
-        # WAVE-2: Check if vectorization is enabled
-        embedding_enabled = _provider_state.get("embedding_enabled", False)
-
-        def _run_llm():
-            llm_result[0], llm_result[1] = _llm_call_summarize(total_text)
-
-        def _run_embed():
-            embed_result[0] = _embed_text(total_text)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            llm_future = pool.submit(_run_llm)
-            llm_future.result(timeout=OLLAMA_TIMEOUT if _provider_state["provider"] == "ollama" else 45)
-            
-            # Only run embedding if enabled in settings
-            if embedding_enabled:
-                embed_future = pool.submit(_run_embed)
-                try:
-                    embed_future.result(timeout=30)
-                except Exception as e:
-                    print(f"[AnalyzeAll][embed] non-fatal: {e}")
-                    embed_result[0] = None
-
-        parsed, usage = llm_result
+        parsed, usage = _llm_call_summarize(total_text)
 
         try:
             gen_summary_upsert(
@@ -108,27 +98,6 @@ def _analyze_single_gen(gen_id: str) -> dict:
             )
         except Exception as e:
             print(f"[AnalyzeAll][cache_store] non-fatal: {e}")
-
-        if embed_result[0]:
-            dbs = get_session()
-            gen_meta = None
-            try:
-                gen_obj = dbs.query(Generation).get(gen_id)
-                if gen_obj:
-                    gen_meta = gen_obj.to_dict()
-            finally:
-                dbs.close()
-            qdrant_payload = _build_qdrant_payload(
-                gen_meta=gen_meta or {},
-                analysis=parsed,
-                user_text_snippet=total_text,
-            )
-            ok = _qdrant_upsert(gen_id, embed_result[0], qdrant_payload)
-            if ok:
-                try:
-                    gen_summary_mark_vectorized(gen_id, True)
-                except Exception as e:
-                    print(f"[AnalyzeAll][mark_vectorized] non-fatal: {e}")
 
         return {"status": "ok"}
     except Exception as e:

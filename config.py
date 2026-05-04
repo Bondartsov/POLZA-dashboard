@@ -55,38 +55,11 @@ OPENROUTER_MODELS = {
     "google/gemma-4-31b-it:free": "Gemma 4 31B",
 }
 
-QDRANT_URL = "http://localhost:6335"
-QDRANT_COLLECTION = "Polza_user_logs"
-QDRANT_ENABLED = True
-
-# Embedding provider: "ollama" (local, free, slow) or "qwen" (cloud, cheap, fast)
-EMBEDDING_PROVIDER = "ollama"  # Default to local Ollama
-EMBEDDING_ENABLED = False  # Master toggle: enable/disable vectorization at all
-QWEN_EMBED_MODEL = "qwen/qwen3-embedding-8b"
-QWEN_EMBED_API_URL = "https://polza.ai/api/v1"  # Same as Polza API
-QWEN_EMBED_API_KEY = ""  # Loaded from POLZA_API_KEY in .env
-QWEN_EMBED_DIMENSIONS = 768
-
-RAG_CHAT_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
-RAG_CHAT_MODELS = {
-    "nvidia/nemotron-3-nano-30b-a3b:free": "Nemotron 3 Nano 30B (fast)",
-    "nvidia/nemotron-3-super-120b-a12b:free": "Nemotron 3 Super 120B",
-    "google/gemma-4-31b-it:free": "Gemma 4 31B",
-}
-RAG_MAX_SOURCES = 20
-RAG_MIN_SCORE = 0.4  # WAVE-1 FIX: raised from 0.15 (was too permissive, accepted noise)
-RAG_MAX_HISTORY = 20
-RAG_MAX_TOKENS = 2000
-RAG_TEMPERATURE = 0.3
-RAG_SESSION_TTL = 7200
 
 _provider_state = {
     "provider": "ollama",
     "auto_analyze": False,
     "openrouter_model": OPENROUTER_MODEL,
-    "rag_chat_model": RAG_CHAT_MODEL,
-    "embedding_provider": EMBEDDING_PROVIDER,  # "ollama" or "qwen"
-    "embedding_enabled": EMBEDDING_ENABLED,  # Master toggle for vectorization
 }
 
 
